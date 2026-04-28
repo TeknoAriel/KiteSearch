@@ -27,6 +27,7 @@ body{font-family:'Sora',sans-serif;background:#1a1a2e;min-height:100vh;display:f
 .suggestions::-webkit-scrollbar{display:none}
 .suggestions.hidden{display:none}
 .chip{background:rgba(0,168,132,0.1);border:1px solid rgba(0,168,132,0.25);color:#00a884;padding:6px 14px;border-radius:20px;font-size:12px;font-family:'Sora',sans-serif;white-space:nowrap;cursor:pointer}
+.chip.subtle{opacity:.8;border-style:dashed}
 .input-area{background:#111b21;padding:8px 12px;display:flex;align-items:flex-end;gap:8px}
 .input-wrap{flex:1;background:#2a3942;border-radius:24px;display:flex;align-items:flex-end;padding:8px 16px}
 textarea{flex:1;background:none;border:none;outline:none;color:#e9edef;font-family:'Sora',sans-serif;font-size:14px;resize:none;max-height:120px;line-height:1.4}
@@ -62,6 +63,7 @@ const defaultSuggestions=[
 {label:'Venta en Rosario',value:'Propiedades en venta en Rosario'},
 {label:'Precios zona centro',value:'Precios de mercado zona centro Rosario'}
 ];
+const resetSuggestion={label:'Nueva búsqueda',value:'__reset__'};
 
 function renderSuggestions(options,{hide=false}={}){
 const box=document.getElementById('suggestions');
@@ -74,9 +76,12 @@ box.classList.remove('hidden');
 box.innerHTML='';
 options.forEach((opt)=>{
 const b=document.createElement('button');
-b.className='chip';
+b.className='chip'+(opt.value==='__reset__'?' subtle':'');
 b.textContent=opt.label;
-b.onclick=()=>send(opt.value);
+b.onclick=()=>{
+if(opt.value==='__reset__'){renderSuggestions(defaultSuggestions);return;}
+send(opt.value);
+};
 box.appendChild(b);
 });
 }
@@ -131,7 +136,7 @@ else addMsg('No se recibio respuesta del servidor.','in');
 if(Array.isArray(d.quickOptions)&&d.quickOptions.length>0){
 renderSuggestions(d.quickOptions.map((o)=>({label:o.label,value:o.value})));
 }else{
-renderSuggestions([], {hide:true});
+renderSuggestions([resetSuggestion]);
 }
 }catch(e){setTyping(false);addMsg('Error de conexion o servidor. Intenta de nuevo en unos segundos.','in');console.error(e);}
 setLoading(false);

@@ -61,7 +61,7 @@ function extractFilters(message) {
   const text = String(message || '').toLowerCase();
   const bedroomsMatch = text.match(/(\d+)\s*(dorm|dormitorio|habit)/);
   const ambientesMatch = text.match(/(\d+)\s*(amb|ambiente)/);
-  const priceMatch = text.match(/(?:hasta|tope|max(?:imo)?)\s*\$?\s*([\d\.\,]+)/);
+  const priceMatch = text.match(/(?:hasta|tope|max(?:imo)?|de|por|presupuesto)\s*\$?\s*([\d\.\,]+)\s*(k|mil|m)?/i);
   const zoneMatch = text.match(/zona\s+([a-záéíóúñ0-9 ]{3,40})/i);
   const enMatch = text.match(/\ben\s+([a-záéíóúñ0-9 ]{3,40})/i);
   const cityWords = [];
@@ -70,15 +70,26 @@ function extractFilters(message) {
   if (text.includes('buenos aires')) cityWords.push('buenos aires');
   if (text.includes('cordoba')) cityWords.push('cordoba');
   if (text.includes('mendoza')) cityWords.push('mendoza');
-  if (zoneMatch) cityWords.push(zoneMatch[1].trim());
-  if (enMatch) cityWords.push(enMatch[1].trim());
+  const isValidLocationPhrase = (v) => {
+    const s = String(v || '').trim().toLowerCase();
+    if (!s) return false;
+    if (/(alquiler|venta|depto|departamento|casa|ph|oficina|terreno|presupuesto|dormitorio|ambiente)/i.test(s)) return false;
+    if (/^\d+$/.test(s)) return false;
+    return true;
+  };
+
+  if (zoneMatch && isValidLocationPhrase(zoneMatch[1])) cityWords.push(zoneMatch[1].trim());
+  if (enMatch && isValidLocationPhrase(enMatch[1])) cityWords.push(enMatch[1].trim());
   const q = cityWords.join(' ').trim() || undefined;
 
-  const normalizePrice = (raw) => {
+  const normalizePrice = (raw, suffix) => {
     if (!raw) return undefined;
     const digits = raw.replace(/[^\d]/g, '');
     if (!digits) return undefined;
-    const n = Number(digits);
+    let n = Number(digits);
+    const s = String(suffix || '').toLowerCase();
+    if (s === 'k' || s === 'mil') n *= 1000;
+    if (s === 'm') n *= 1000000;
     return Number.isFinite(n) ? n : undefined;
   };
 
@@ -93,14 +104,51 @@ function extractFilters(message) {
 
   return {
     q,
-    op_type: text.includes('alquiler') ? 'rental' : (text.includes('venta') ? 'sale' : undefined),
+    op_type: /(alquiler|alquilar|arriendo|arrendar|rent)/i.test(text) ? 'rental' : (/(venta|vender|sale)/i.test(text) ? 'sale' : undefined),
     type: detectType(),
     bedrooms: text.includes('monoambiente') ? 0 : (bedroomsMatch ? Number(bedroomsMatch[1]) : (ambientesMatch ? Math.max(0, Number(ambientesMatch[1]) - 1) : undefined)),
-    price_max: normalizePrice(priceMatch?.[1]),
+    price_max: normalizePrice(priceMatch?.[1], priceMatch?.[2]),
     currency_id: 2,
     status: 'active',
     limit: 5
   };
+}
+
+function evaluateSearchReadiness(filters) {
+  const missing = [];
+  if (!filters?.op_type) missing.push('operacion');
+  if (!filters?.q) missing.push('localidad_zona');
+  if (!filters?.type) missing.push('tipo_propiedad');
+  if (!filters?.price_max) missing.push('presupuesto');
+  return missing;
+}
+
+function buildQualificationReply(missing, filters) {
+  const labels = {
+    operacion: 'operación (*alquiler* o *venta*)',
+    localidad_zona: 'localidad y/o zona',
+    tipo_propiedad: 'tipo de propiedad',
+    presupuesto: 'presupuesto aproximado'
+  };
+
+  const missingText = missing.map((k) => `- ${labels[k]}`).join('\n');
+  const base = [
+    'Para que la búsqueda sea precisa en Argentina, Chile o Uruguay, necesito completar estos datos antes de buscar:',
+    missingText,
+    '',
+    'Si querés, también sumemos *dormitorios/ambientes* para agilizar resultados.'
+  ];
+
+  if (filters?.op_type || filters?.type || filters?.price_max) {
+    const quick = [
+      '',
+      'Con lo que ya me pasaste, podés responder así:',
+      `"${filters?.type === 'house' ? 'casa' : 'depto'} ${filters?.op_type === 'sale' ? 'en venta' : 'en alquiler'} en [localidad] zona [barrio] ${filters?.price_max ? `hasta ${filters.price_max}` : ''} ${filters?.bedrooms ? `${filters.bedrooms} dormitorios` : ''}"`.replace(/\s+/g, ' ').trim()
+    ];
+    return [...base, ...quick].join('\n');
+  }
+
+  return base.join('\n');
 }
 
 function isSearchIntent(message, filters) {
@@ -430,6 +478,17 @@ module.exports = async function handler(req, res) {
       const softReply = '¡Dale! Contame qué querés ajustar (zona, tipo de propiedad, operación, precio o dormitorios) y te afino la búsqueda.';
       await saveMessage(phone, 'assistant', softReply);
       return res.status(200).json({ response: softReply, profile });
+    }
+
+    const missingCriteria = evaluateSearchReadiness(extracted);
+    if (missingCriteria.length > 0) {
+      const qualificationReply = buildQualificationReply(missingCriteria, extracted);
+      await saveMessage(phone, 'assistant', qualificationReply);
+      return res.status(200).json({
+        response: qualificationReply,
+        profile,
+        pendingCriteria: missingCriteria
+      });
     }
 
     if (searchIntent) {

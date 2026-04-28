@@ -274,15 +274,35 @@ function formatPropertiesReply(items, profile) {
 }
 
 async function getOrCreateUser(phone) {
-  const { data, error } = await supabase.from('users').select('*').eq('phone', phone).single();
-  if (error || !data) {
-    const { data: u } = await supabase
-      .from('users')
-      .insert({ phone, search_count: 0, created_at: new Date().toISOString() })
-      .select().single();
-    return u;
-  }
-  return data;
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('phone', phone)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!error && data) return data;
+
+  const { data: inserted, error: insertError } = await supabase
+    .from('users')
+    .insert({ phone, search_count: 0, created_at: new Date().toISOString() })
+    .select()
+    .maybeSingle();
+
+  if (!insertError && inserted) return inserted;
+
+  const { data: fallback } = await supabase
+    .from('users')
+    .select('*')
+    .eq('phone', phone)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (fallback) return fallback;
+
+  return { phone, search_count: 0, premium: false };
 }
 
 async function incrementSearchCount(phone) {

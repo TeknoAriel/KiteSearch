@@ -31,6 +31,7 @@ body{font-family:'Sora',sans-serif;background:#1a1a2e;min-height:100vh;display:f
 textarea{flex:1;background:none;border:none;outline:none;color:#e9edef;font-family:'Sora',sans-serif;font-size:14px;resize:none;max-height:120px;line-height:1.4}
 textarea::placeholder{color:#8696a0}
 .send{width:48px;height:48px;border-radius:50%;background:#00a884;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+.send:disabled{opacity:.6;cursor:not-allowed}
 .send svg{fill:white}
 </style>
 </head>
@@ -57,9 +58,12 @@ textarea::placeholder{color:#8696a0}
 </div>
 </div>
 <script>
-const phone='demo-'+Math.random().toString(36).substr(2,9);
+const phone='demo-'+Math.random().toString(36).slice(2,11);
 let loading=false;
-function fmt(t){return t.replace(/\*(.*?)\*/g,'<strong>$1</strong>')}
+function escapeHtml(t){
+return t.replace(/[&<>"']/g,(c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+function fmt(t){return escapeHtml(t).replace(/\*(.*?)\*/g,'<strong>$1</strong>')}
 function addMsg(txt,type){
 const chat=document.getElementById('chat');
 const typing=document.getElementById('typing');
@@ -74,22 +78,32 @@ document.getElementById('typing').className='typing'+(v?' on':'');
 document.getElementById('st').textContent=v?'escribiendo...':'en linea';
 document.getElementById('chat').scrollTop=document.getElementById('chat').scrollHeight;
 }
+function setLoading(v){
+loading=v;
+document.querySelector('.send').disabled=v;
+document.getElementById('inp').disabled=v;
+}
 async function sendMsg(){
 if(loading)return;
 const inp=document.getElementById('inp');
 const msg=inp.value.trim();
 if(!msg)return;
 inp.value='';inp.style.height='auto';
-loading=true;
+setLoading(true);
 addMsg(msg,'out');
 setTyping(true);
 try{
 const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,phone})});
+if(!r.ok){
+const text=await r.text();
+throw new Error(`HTTP ${r.status}: ${text}`);
+}
 const d=await r.json();
 setTyping(false);
 if(d.response)addMsg(d.response,'in');
-}catch(e){setTyping(false);addMsg('Error de conexion. Intenta de nuevo.','in');}
-loading=false;
+else addMsg('No se recibio respuesta del servidor.','in');
+}catch(e){setTyping(false);addMsg('Error de conexion o servidor. Intenta de nuevo en unos segundos.','in');console.error(e);}
+setLoading(false);
 }
 function send(t){document.getElementById('inp').value=t;sendMsg();}
 </script>

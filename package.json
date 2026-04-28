@@ -1,6 +1,9 @@
 {
   "name": "kyprop-bot",
   "version": "1.0.0",
+  "scripts": {
+    "test:smoke": "node -e \"const handler=require('./api/chat.js');const req={method:'POST',body:{message:'depto alquiler rosario',phone:'test'}};const res={status:(c)=>({json:(d)=>console.log('STATUS:',c,JSON.stringify(d,null,2))}),setHeader:()=>{},end:()=>{}};handler(req,res).catch((e)=>{console.error('ERROR:',e.message);process.exit(1);});\""
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@supabase/supabase-js": "^2.39.0"

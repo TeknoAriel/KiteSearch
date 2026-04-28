@@ -81,6 +81,15 @@ function extractFilters(message) {
   if (text.includes('buenos aires')) cityWords.push('buenos aires');
   if (text.includes('cordoba')) cityWords.push('cordoba');
   if (text.includes('mendoza')) cityWords.push('mendoza');
+  const localityDetails = [];
+  const localityRegex = /(rosario|funes|roldan|caba|buenos aires|cordoba|mendoza|montevideo|santiago|las condes)\s+([a-záéíóúñ]{3,20})/gi;
+  let localityMatch;
+  while ((localityMatch = localityRegex.exec(compact)) !== null) {
+    const detail = String(localityMatch[2] || '').trim();
+    if (detail && !/(alquiler|venta|depto|departamento|casa|ph|oficina|terreno|dormitorio|ambiente)/i.test(detail)) {
+      localityDetails.push(detail);
+    }
+  }
   const isValidLocationPhrase = (v) => {
     const s = String(v || '').trim().toLowerCase();
     if (!s) return false;
@@ -108,6 +117,7 @@ function extractFilters(message) {
       }
     }
   }
+  localityDetails.forEach((d) => cityWords.push(d));
   const q = cityWords.join(' ').trim() || undefined;
 
   const normalizePrice = (raw, suffix) => {
@@ -123,6 +133,9 @@ function extractFilters(message) {
   const parsedBudget =
     normalizePrice(priceMatch?.[1], priceMatch?.[2]) ||
     normalizePrice(standalonePriceMatch?.[1], standalonePriceMatch?.[2]);
+  const currencyHint = /(usd|u\$d|d[oó]lar|dolares)/i.test(compact)
+    ? 'USD'
+    : (/(ars|peso|\$)/i.test(compact) ? 'ARS' : undefined);
 
   const detectType = () => {
     if (/(depto|departamento)/i.test(text)) return 'apartments';
@@ -139,6 +152,7 @@ function extractFilters(message) {
     type: detectType(),
     bedrooms: text.includes('monoambiente') ? 0 : (bedroomsMatch ? Number(bedroomsMatch[1]) : (ambientesMatch ? Math.max(0, Number(ambientesMatch[1]) - 1) : undefined)),
     price_max: parsedBudget,
+    currency_hint: currencyHint,
     currency_id: 2,
     status: 'active',
     limit: 5

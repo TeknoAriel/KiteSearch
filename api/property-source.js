@@ -49,16 +49,35 @@ function containsInsensitive(haystack, needle) {
 }
 
 function applyFilters(items, filters) {
-  const normalizedOp = filters.op_type === 'rental' ? 'rent' : filters.op_type;
+  const normalizeOperation = (value) => {
+    const v = String(value || '').toLowerCase();
+    if (!v) return '';
+    if (/(rental|rent|alquiler|arriendo)/.test(v)) return 'rental';
+    if (/(sale|venta)/.test(v)) return 'sale';
+    return v;
+  };
+  const normalizeCurrency = (value) => {
+    const v = String(value || '').toLowerCase();
+    if (!v) return '';
+    if (/(ars|peso)/.test(v)) return 'ARS';
+    if (/(usd|u\$d|d[oó]lar)/.test(v)) return 'USD';
+    return '';
+  };
+  const normalizedOp = normalizeOperation(filters.op_type);
   const normalizedType = filters.type === 'apartments' ? 'apartment' : filters.type;
   return items.filter((p) => {
     if (filters.q && !containsInsensitive(`${p.title} ${p.zone}`, filters.q)) return false;
     if (normalizedOp) {
-      const op = pick(p.raw, ['op_type', 'operation_type', 'operation', 'operations.0.type'], '');
-      if (!containsInsensitive(op, normalizedOp)) return false;
+      const op = normalizeOperation(p.op_type || pick(p.raw, ['op_type', 'operation_type', 'operation', 'operations.0.type'], ''));
+      if (!op || op !== normalizedOp) return false;
     }
     if (normalizedType && !containsInsensitive(p.type, normalizedType)) return false;
     if (filters.price_max && typeof p.price === 'number' && p.price > filters.price_max) return false;
+    if (filters.currency_hint) {
+      const itemCurrency = normalizeCurrency(p.currency || pick(p.raw, ['currency', 'priceCurrency', 'currency_id'], ''));
+      const wantedCurrency = normalizeCurrency(filters.currency_hint);
+      if (wantedCurrency && itemCurrency && itemCurrency !== wantedCurrency) return false;
+    }
     if (filters.bedrooms && typeof p.bedrooms === 'number' && p.bedrooms < filters.bedrooms) return false;
     return true;
   });

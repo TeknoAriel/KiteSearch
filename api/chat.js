@@ -31,31 +31,6 @@ async function saveMessage(phone, role, content) {
   await supabase.from('messages').insert({ phone, role, content, created_at: new Date().toISOString() });
 }
 
-async function searchKiteProp(query) {
-  try {
-    const response = await fetch('https://mcp.kiteprop.com/mcp', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': process.env.KITEPROP_API_KEY
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {
-          name: 'search_properties',
-          arguments: { query }
-        }
-      })
-    });
-    const data = await response.json();
-    return JSON.stringify(data?.result || data);
-  } catch (e) {
-    return null;
-  }
-}
-
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -75,16 +50,18 @@ module.exports = async function handler(req, res) {
     const history = await getHistory(phone);
     await saveMessage(phone, 'user', message);
 
-    const kitepropData = await searchKiteProp(message);
-    const contextMessage = kitepropData
-      ? `El usuario busca: "${message}"\n\nResultados de KiteProp:\n${kitepropData}`
-      : `El usuario busca: "${message}"\n\nNo se encontraron resultados en KiteProp para esta búsqueda.`;
-
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
-      messages: [...history, { role: 'user', content: contextMessage }]
+      messages: [...history, { role: 'user', content: message }],
+      mcp_servers: [{
+        type: 'url',
+        url: 'https://mcp.kiteprop.com/mcp',
+        name: 'kiteprop',
+        authorization_token: process.env.KITEPROP_API_KEY
+      }],
+      betas: ['mcp-client-2025-04-04']
     });
 
     const reply = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n');

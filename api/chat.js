@@ -179,7 +179,12 @@ function buildQualificationReply(missing, filters) {
     return [...base, ...quick].join('\n');
   }
 
-  return base.join('\n');
+  const withQuickType = [...base];
+  if (missing.includes('tipo_propiedad')) {
+    withQuickType.push('');
+    withQuickType.push('Opciones rápidas de tipo: *Casa* | *Departamento* | *PH* | *Oficina* | *Terreno*');
+  }
+  return withQuickType.join('\n');
 }
 
 function isSearchIntent(message, filters) {
@@ -514,11 +519,21 @@ module.exports = async function handler(req, res) {
     const missingCriteria = evaluateSearchReadiness(extracted);
     if (missingCriteria.length > 0) {
       const qualificationReply = buildQualificationReply(missingCriteria, extracted);
+      const quickOptions = missingCriteria.includes('tipo_propiedad')
+        ? [
+          { id: 'type_house', label: 'Casa', value: 'casa' },
+          { id: 'type_apartment', label: 'Departamento', value: 'departamento' },
+          { id: 'type_ph', label: 'PH', value: 'ph' },
+          { id: 'type_office', label: 'Oficina', value: 'oficina' },
+          { id: 'type_land', label: 'Terreno', value: 'terreno' }
+        ]
+        : [];
       await saveMessage(phone, 'assistant', qualificationReply);
       return res.status(200).json({
         response: qualificationReply,
         profile,
-        pendingCriteria: missingCriteria
+        pendingCriteria: missingCriteria,
+        quickOptions
       });
     }
 

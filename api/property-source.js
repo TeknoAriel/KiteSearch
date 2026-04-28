@@ -1,4 +1,5 @@
 const DEFAULT_REST_URL = 'https://www.kiteprop.com/api/v1/properties';
+const DEFAULT_PROPIEYA_TRPC_URL = 'https://www.propieya.com/api/trpc/listing.search';
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
@@ -45,13 +46,15 @@ function containsInsensitive(haystack, needle) {
 }
 
 function applyFilters(items, filters) {
+  const normalizedOp = filters.op_type === 'rental' ? 'rent' : filters.op_type;
+  const normalizedType = filters.type === 'apartments' ? 'apartment' : filters.type;
   return items.filter((p) => {
     if (filters.q && !containsInsensitive(`${p.title} ${p.zone}`, filters.q)) return false;
-    if (filters.op_type) {
+    if (normalizedOp) {
       const op = pick(p.raw, ['op_type', 'operation_type', 'operation', 'operations.0.type'], '');
-      if (!containsInsensitive(op, filters.op_type)) return false;
+      if (!containsInsensitive(op, normalizedOp)) return false;
     }
-    if (filters.type && !containsInsensitive(p.type, filters.type)) return false;
+    if (normalizedType && !containsInsensitive(p.type, normalizedType)) return false;
     if (filters.price_max && typeof p.price === 'number' && p.price > filters.price_max) return false;
     if (filters.bedrooms && typeof p.bedrooms === 'number' && p.bedrooms < filters.bedrooms) return false;
     return true;
@@ -115,7 +118,42 @@ async function searchFromStatic(filters) {
   return { source: 'static', items: filtered, total: filtered.length };
 }
 
+async function searchFromPropieYa(filters) {
+  const payload = {};
+  if (filters.q) payload.q = filters.q;
+  if (filters.op_type) payload.operationType = filters.op_type === 'rental' ? 'rent' : (filters.op_type === 'sale' ? 'sale' : filters.op_type);
+  if (filters.type) payload.propertyType = filters.type === 'apartments' ? 'apartment' : filters.type;
+
+  const encoded = encodeURIComponent(JSON.stringify({ json: payload }));
+  const url = `${process.env.PROPIEYA_TRPC_URL || DEFAULT_PROPIEYA_TRPC_URL}?input=${encoded}`;
+  const response = await fetch(url, { headers: { accept: 'application/json' } });
+  if (!response.ok) throw new Error(`PropieYa source error ${response.status}`);
+
+  const json = await response.json();
+  const data = json?.result?.data?.json || {};
+  const rawItems = normalizeArray(data.items);
+  const normalized = rawItems.map((item) => normalizeProperty({
+    ...item,
+    type: item.propertyType,
+    city: item?.address?.city,
+    zone: item?.address?.neighborhood,
+    price: item.priceAmount,
+    currency: item.priceCurrency,
+    bedrooms: item.bedrooms,
+    op_type: item.operationType
+  }));
+  const filtered = applyFilters(normalized, filters);
+  return { source: 'propieya_trpc', items: filtered, total: Number(data.total || filtered.length) };
+}
+
 async function searchProperties(filters) {
+  try {
+    const propieya = await searchFromPropieYa(filters);
+    if (propieya.items.length > 0) return propieya;
+  } catch {
+    // Ignore and continue with secondary sources.
+  }
+
   const rest = await searchFromRest(filters);
   if (rest.items.length > 0) return rest;
   const fallback = await searchFromStatic(filters);

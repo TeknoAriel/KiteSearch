@@ -50,7 +50,7 @@ module.exports = async function handler(req, res) {
     const history = await getHistory(phone);
     await saveMessage(phone, 'user', message);
 
-    const response = await anthropic.messages.create({
+    const response = await anthropic.beta.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
       system: SYSTEM_PROMPT,

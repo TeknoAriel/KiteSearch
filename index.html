@@ -25,6 +25,7 @@ body{font-family:'Sora',sans-serif;background:#1a1a2e;min-height:100vh;display:f
 @keyframes bounce{0%,60%,100%{transform:translateY(0);opacity:0.4}30%{transform:translateY(-6px);opacity:1}}
 .suggestions{display:flex;gap:8px;padding:8px 16px;overflow-x:auto;background:#111b21;border-top:1px solid #222d34}
 .suggestions::-webkit-scrollbar{display:none}
+.suggestions.hidden{display:none}
 .chip{background:rgba(0,168,132,0.1);border:1px solid rgba(0,168,132,0.25);color:#00a884;padding:6px 14px;border-radius:20px;font-size:12px;font-family:'Sora',sans-serif;white-space:nowrap;cursor:pointer}
 .input-area{background:#111b21;padding:8px 12px;display:flex;align-items:flex-end;gap:8px}
 .input-wrap{flex:1;background:#2a3942;border-radius:24px;display:flex;align-items:flex-end;padding:8px 16px}
@@ -45,11 +46,7 @@ textarea::placeholder{color:#8696a0}
 <div class="msg in">Hola! Soy KiteSearch, tu asistente inmobiliario. Contame que estas buscando: tipo de propiedad, zona y presupuesto</div>
 <div class="typing" id="typing"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
 </div>
-<div class="suggestions">
-<button class="chip" onclick="send('Busco depto 1 dormitorio en alquiler en Rosario hasta 600000 pesos')">Depto 1 dorm alquiler</button>
-<button class="chip" onclick="send('Propiedades en venta en Rosario')">Venta en Rosario</button>
-<button class="chip" onclick="send('Precios de mercado zona centro Rosario')">Precios zona centro</button>
-</div>
+<div class="suggestions" id="suggestions"></div>
 <div class="input-area">
 <div class="input-wrap">
 <textarea id="inp" placeholder="Escribi tu busqueda..." rows="1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,120)+'px'"></textarea>
@@ -60,6 +57,34 @@ textarea::placeholder{color:#8696a0}
 <script>
 const phone='demo-'+Math.random().toString(36).slice(2,11);
 let loading=false;
+const defaultSuggestions=[
+{label:'Depto 1 dorm alquiler',value:'Busco depto 1 dormitorio en alquiler en Rosario hasta 600000 pesos'},
+{label:'Venta en Rosario',value:'Propiedades en venta en Rosario'},
+{label:'Precios zona centro',value:'Precios de mercado zona centro Rosario'}
+];
+
+function renderSuggestions(options,{hide=false}={}){
+const box=document.getElementById('suggestions');
+if(hide||!options||options.length===0){
+box.classList.add('hidden');
+box.innerHTML='';
+return;
+}
+box.classList.remove('hidden');
+box.innerHTML='';
+options.forEach((opt)=>{
+const b=document.createElement('button');
+b.className='chip';
+b.textContent=opt.label;
+b.onclick=()=>send(opt.value);
+box.appendChild(b);
+});
+}
+
+function shouldResetSuggestions(msg){
+return /(nueva busqueda|nueva búsqueda|empezar de nuevo|reiniciar|otra busqueda|otra búsqueda)/i.test(msg||'');
+}
+
 function escapeHtml(t){
 return t.replace(/[&<>"']/g,(c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
@@ -88,6 +113,7 @@ if(loading)return;
 const inp=document.getElementById('inp');
 const msg=inp.value.trim();
 if(!msg)return;
+if(shouldResetSuggestions(msg))renderSuggestions(defaultSuggestions);
 inp.value='';inp.style.height='auto';
 setLoading(true);
 addMsg(msg,'out');
@@ -102,10 +128,16 @@ const d=await r.json();
 setTyping(false);
 if(d.response)addMsg(d.response,'in');
 else addMsg('No se recibio respuesta del servidor.','in');
+if(Array.isArray(d.quickOptions)&&d.quickOptions.length>0){
+renderSuggestions(d.quickOptions.map((o)=>({label:o.label,value:o.value})));
+}else{
+renderSuggestions([], {hide:true});
+}
 }catch(e){setTyping(false);addMsg('Error de conexion o servidor. Intenta de nuevo en unos segundos.','in');console.error(e);}
 setLoading(false);
 }
 function send(t){document.getElementById('inp').value=t;sendMsg();}
+renderSuggestions(defaultSuggestions);
 </script>
 </body>
 </html>

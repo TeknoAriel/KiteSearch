@@ -150,6 +150,23 @@ function sortByIntent(items, filters) {
   });
 }
 
+function dedupeListings(items) {
+  const seen = new Set();
+  return normalizeArray(items).filter((item) => {
+    const key = [
+      normalizeText(item.type),
+      normalizeText(item.zone),
+      normalizeText(item.title),
+      Number(item.price || 0),
+      normalizeText(item.currency),
+      normalizeText(item.op_type || pick(item.raw, ['operationType', 'operation_type', 'operation'], ''))
+    ].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 async function searchFromRest(filters) {
   const run = async (currentFilters) => {
     const params = new URLSearchParams({ limit: String(currentFilters.limit || 15) });
@@ -231,7 +248,7 @@ async function searchFromPropieYa(filters) {
     bedrooms: item.bedrooms,
     op_type: item.operationType
   }));
-  const filtered = sortByIntent(applyFilters(normalized, filters), filters);
+  const filtered = dedupeListings(sortByIntent(applyFilters(normalized, filters), filters));
   return { source: 'propieya_trpc', items: filtered, total: Number(data.total || filtered.length) };
 }
 

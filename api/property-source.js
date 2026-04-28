@@ -61,6 +61,44 @@ function applyFilters(items, filters) {
   });
 }
 
+function scoreByIntent(property, filters) {
+  let score = 0;
+  const pType = String(property.type || '').toLowerCase();
+  const pZone = String(property.zone || '').toLowerCase();
+  const pTitle = String(property.title || '').toLowerCase();
+  const targetType = filters.type === 'apartments' ? 'apartment' : String(filters.type || '').toLowerCase();
+
+  if (targetType) {
+    if (pType === targetType) score += 100;
+    else if (pType.includes(targetType)) score += 60;
+    else score -= 40;
+  }
+
+  if (filters.q) {
+    const q = String(filters.q).toLowerCase();
+    if (pZone.includes(q)) score += 35;
+    if (pTitle.includes(q)) score += 20;
+  }
+
+  if (filters.price_max && typeof property.price === 'number') {
+    if (property.price <= filters.price_max) score += 15;
+    else score -= 50;
+  }
+
+  return score;
+}
+
+function sortByIntent(items, filters) {
+  return [...items].sort((a, b) => {
+    const scoreDiff = scoreByIntent(b, filters) - scoreByIntent(a, filters);
+    if (scoreDiff !== 0) return scoreDiff;
+
+    const aPrice = typeof a.price === 'number' ? a.price : Number.POSITIVE_INFINITY;
+    const bPrice = typeof b.price === 'number' ? b.price : Number.POSITIVE_INFINITY;
+    return aPrice - bPrice;
+  });
+}
+
 async function searchFromRest(filters) {
   const run = async (currentFilters) => {
     const params = new URLSearchParams({ limit: String(currentFilters.limit || 15) });
@@ -142,7 +180,7 @@ async function searchFromPropieYa(filters) {
     bedrooms: item.bedrooms,
     op_type: item.operationType
   }));
-  const filtered = applyFilters(normalized, filters);
+  const filtered = sortByIntent(applyFilters(normalized, filters), filters);
   return { source: 'propieya_trpc', items: filtered, total: Number(data.total || filtered.length) };
 }
 

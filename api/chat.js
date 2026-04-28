@@ -78,11 +78,33 @@ function extractFilters(message) {
 }
 
 function formatPropertiesReply(items) {
+  const typeLabel = (rawType) => {
+    const type = String(rawType || '').toLowerCase();
+    const map = {
+      apartment: 'Departamento',
+      apartments: 'Departamento',
+      house: 'Casa',
+      ph: 'PH',
+      land: 'Terreno',
+      office: 'Oficina',
+      warehouse: 'Depósito',
+      development_unit: 'Unidad en desarrollo'
+    };
+    return map[type] || 'Propiedad';
+  };
+
+  const roomsLabel = (bedrooms) => {
+    if (typeof bedrooms !== 'number') return 'N/D';
+    if (bedrooms <= 0) return 'Monoambiente';
+    if (bedrooms === 1) return '1 dormitorio';
+    return `${bedrooms} dormitorios`;
+  };
+
   const lines = ['Encontré estas opciones reales para tu búsqueda:'];
   items.slice(0, 4).forEach((p, i) => {
     const price = p.price != null ? `${p.currency || '$'}${p.price}` : 'consultar';
-    lines.push(`${i + 1}. 🏠 *${p.type || 'Propiedad'}* en *${p.zone || 'zona no especificada'}*`);
-    lines.push(`   💰 ${price} | 🛏️ ${p.bedrooms ?? 'N/D'} amb`);
+    lines.push(`${i + 1}. 🏠 *${typeLabel(p.type)}* en *${p.zone || 'zona no especificada'}*`);
+    lines.push(`   💰 ${price} | 🛏️ ${roomsLabel(p.bedrooms)}`);
     lines.push(`   🧾 ${p.title || 'Sin título'}`);
   });
   lines.push('');

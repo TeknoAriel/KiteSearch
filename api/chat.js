@@ -7,6 +7,7 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
 const MCP_URL = process.env.KITEPROP_MCP_URL || 'https://mcp.kiteprop.com/mcp';
 const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.CHAT_TIMEOUT_MS || '25000', 10);
+const PROFILE_META_PREFIX = '__kitesearch_profile__:';
 
 const SYSTEM_PROMPT = `Sos KiteSearch, el asistente inmobiliario inteligente de KiteProp.
 
@@ -36,7 +37,12 @@ function getMissingEnv() {
 
 function normalizeHistory(history) {
   return history
-    .filter((item) => (item.role === 'user' || item.role === 'assistant') && typeof item.content === 'string' && item.content.trim())
+    .filter((item) =>
+      (item.role === 'user' || item.role === 'assistant') &&
+      typeof item.content === 'string' &&
+      item.content.trim() &&
+      !String(item.content).startsWith(PROFILE_META_PREFIX)
+    )
     .map((item) => ({ role: item.role, content: item.content }));
 }
 
@@ -119,6 +125,42 @@ function buildConversationContext(history, message) {
   }
 
   return { filters, profile };
+}
+
+function readPersistedProfile(history) {
+  const metadata = [...history]
+    .reverse()
+    .find((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content.startsWith(PROFILE_META_PREFIX));
+  if (!metadata) return null;
+
+  try {
+    const parsed = JSON.parse(metadata.content.slice(PROFILE_META_PREFIX.length));
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      clientType: parsed.clientType === 'agency' ? 'agency' : 'individual',
+      agencyName: parsed.agencyName || undefined,
+      agencyPhone: parsed.agencyPhone || undefined
+    };
+  } catch {
+    return null;
+  }
+}
+
+function mergeProfile(base, override) {
+  return {
+    clientType: override?.clientType || base?.clientType || 'individual',
+    agencyName: override?.agencyName || base?.agencyName,
+    agencyPhone: override?.agencyPhone || base?.agencyPhone
+  };
+}
+
+async function persistProfile(phone, profile) {
+  const payload = {
+    clientType: profile?.clientType === 'agency' ? 'agency' : 'individual',
+    agencyName: profile?.agencyName || null,
+    agencyPhone: profile?.agencyPhone || null
+  };
+  await saveMessage(phone, 'assistant', `${PROFILE_META_PREFIX}${JSON.stringify(payload)}`);
 }
 
 function isOwnStock(property, profile) {
@@ -258,7 +300,9 @@ module.exports = async function handler(req, res) {
 
     const context = buildConversationContext(history, message.trim());
     const extracted = context.filters;
-    const profile = context.profile;
+    const persistedProfile = readPersistedProfile(history);
+    const profile = mergeProfile(persistedProfile, context.profile);
+    await persistProfile(phone, profile);
 
     if (extracted.op_type || extracted.q || extracted.type) {
       try {

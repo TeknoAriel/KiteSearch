@@ -68,6 +68,7 @@ function scoreByIntent(property, filters) {
   let score = 0;
   const pType = String(property.type || '').toLowerCase();
   const pZone = String(property.zone || '').toLowerCase();
+  const pNeighborhood = String(pick(property.raw, ['address.neighborhood'], '') || '').toLowerCase();
   const pTitle = String(property.title || '').toLowerCase();
   const targetType = filters.type === 'apartments' ? 'apartment' : String(filters.type || '').toLowerCase();
 
@@ -80,7 +81,12 @@ function scoreByIntent(property, filters) {
   if (filters.q) {
     const q = String(filters.q).toLowerCase();
     if (pZone.includes(q)) score += 35;
+    if (pNeighborhood.includes(q)) score += 45;
     if (pTitle.includes(q)) score += 20;
+    const qTerms = q.split(/\s+/).filter(Boolean);
+    qTerms.forEach((term) => {
+      if (term.length >= 3 && (pZone.includes(term) || pNeighborhood.includes(term))) score += 8;
+    });
   }
 
   if (filters.price_max && typeof property.price === 'number') {

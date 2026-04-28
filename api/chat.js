@@ -9,6 +9,7 @@ const MCP_URL = process.env.KITEPROP_MCP_URL || 'https://mcp.kiteprop.com/mcp';
 const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.CHAT_TIMEOUT_MS || '25000', 10);
 const PROFILE_META_PREFIX = '__kitesearch_profile__:';
 const SHOWN_META_PREFIX = '__kitesearch_shown_ids__:';
+const CONTACT_PREF_META_PREFIX = '__kitesearch_contact_pref__:';
 
 const SYSTEM_PROMPT = `Sos KiteSearch, el asistente inmobiliario inteligente de KiteProp.
 
@@ -43,7 +44,8 @@ function normalizeHistory(history) {
       typeof item.content === 'string' &&
       item.content.trim() &&
       !String(item.content).startsWith(PROFILE_META_PREFIX) &&
-      !String(item.content).startsWith(SHOWN_META_PREFIX)
+      !String(item.content).startsWith(SHOWN_META_PREFIX) &&
+      !String(item.content).startsWith(CONTACT_PREF_META_PREFIX)
     )
     .map((item) => ({ role: item.role, content: item.content }));
 }
@@ -58,8 +60,10 @@ function withTimeout(promise, ms) {
 function extractFilters(message) {
   const text = String(message || '').toLowerCase();
   const bedroomsMatch = text.match(/(\d+)\s*(dorm|dormitorio|habit)/);
+  const ambientesMatch = text.match(/(\d+)\s*(amb|ambiente)/);
   const priceMatch = text.match(/(?:hasta|tope|max(?:imo)?)\s*\$?\s*([\d\.\,]+)/);
   const zoneMatch = text.match(/zona\s+([a-záéíóúñ0-9 ]{3,40})/i);
+  const enMatch = text.match(/\ben\s+([a-záéíóúñ0-9 ]{3,40})/i);
   const cityWords = [];
   if (text.includes('rosario')) cityWords.push('rosario');
   if (text.includes('caba')) cityWords.push('caba');
@@ -67,6 +71,7 @@ function extractFilters(message) {
   if (text.includes('cordoba')) cityWords.push('cordoba');
   if (text.includes('mendoza')) cityWords.push('mendoza');
   if (zoneMatch) cityWords.push(zoneMatch[1].trim());
+  if (enMatch) cityWords.push(enMatch[1].trim());
   const q = cityWords.join(' ').trim() || undefined;
 
   const normalizePrice = (raw) => {
@@ -90,7 +95,7 @@ function extractFilters(message) {
     q,
     op_type: text.includes('alquiler') ? 'rental' : (text.includes('venta') ? 'sale' : undefined),
     type: detectType(),
-    bedrooms: bedroomsMatch ? Number(bedroomsMatch[1]) : undefined,
+    bedrooms: text.includes('monoambiente') ? 0 : (bedroomsMatch ? Number(bedroomsMatch[1]) : (ambientesMatch ? Math.max(0, Number(ambientesMatch[1]) - 1) : undefined)),
     price_max: normalizePrice(priceMatch?.[1]),
     currency_id: 2,
     status: 'active',
@@ -208,6 +213,36 @@ function readShownIds(history) {
 async function persistShownIds(phone, ids) {
   const unique = [...new Set((ids || []).map(String))].slice(-40);
   await saveMessage(phone, 'assistant', `${SHOWN_META_PREFIX}${JSON.stringify({ ids: unique })}`);
+}
+
+function readContactPreference(history) {
+  const metadata = [...history]
+    .reverse()
+    .find((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content.startsWith(CONTACT_PREF_META_PREFIX));
+  if (!metadata) return null;
+  try {
+    const parsed = JSON.parse(metadata.content.slice(CONTACT_PREF_META_PREFIX.length));
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed.preference === 'own' || parsed.preference === 'publisher' ? parsed.preference : null;
+  } catch {
+    return null;
+  }
+}
+
+async function persistContactPreference(phone, preference) {
+  if (preference !== 'own' && preference !== 'publisher') return;
+  await saveMessage(phone, 'assistant', `${CONTACT_PREF_META_PREFIX}${JSON.stringify({ preference })}`);
+}
+
+function extractContactPreference(message) {
+  const text = String(message || '').toLowerCase();
+  if (/(mis datos|nuestros datos|datos propios|mi inmobiliaria|nuestro contacto)/i.test(text)) return 'own';
+  if (/(publicante|de la inmobiliaria publicante|sus datos|datos de origen)/i.test(text)) return 'publisher';
+  return null;
+}
+
+function isFichaIntent(message) {
+  return /(enviar ficha|pasar ficha|compartir ficha|mandar ficha|armar ficha)/i.test(String(message || '').toLowerCase());
 }
 
 function isOwnStock(property, profile) {
@@ -362,15 +397,34 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const history = normalizeHistory(await getHistory(phone));
+    const rawHistory = await getHistory(phone);
+    const history = normalizeHistory(rawHistory);
     await saveMessage(phone, 'user', message.trim());
 
     const context = buildConversationContext(history, message.trim());
     const extracted = context.filters;
-    const persistedProfile = readPersistedProfile(history);
+    const persistedProfile = readPersistedProfile(rawHistory);
     const profile = mergeProfile(persistedProfile, context.profile);
     await persistProfile(phone, profile);
+    const explicitPreference = extractContactPreference(message.trim());
+    if (explicitPreference) {
+      await persistContactPreference(phone, explicitPreference);
+      const prefReply = explicitPreference === 'publisher'
+        ? 'Perfecto, tomo *datos de la inmobiliaria publicante* para compartir fichas externas.'
+        : 'Perfecto, tomo *tus datos de inmobiliaria* para compartir fichas.';
+      await saveMessage(phone, 'assistant', prefReply);
+      return res.status(200).json({ response: prefReply, profile, contactPreference: explicitPreference });
+    }
+    const contactPreference = explicitPreference || readContactPreference(rawHistory);
     const searchIntent = isSearchIntent(message.trim(), extracted);
+
+    if (isFichaIntent(message.trim())) {
+      const fichaReply = profile.clientType === 'agency'
+        ? `Perfecto. Para enviar la ficha voy a usar *${contactPreference === 'publisher' ? 'los datos de la inmobiliaria publicante' : 'tus datos de inmobiliaria'}*.\n\nSi querés cambiarlo en cualquier momento, decime: "*usar mis datos*" o "*usar datos de la publicante*".`
+        : 'Perfecto. Si querés, te preparo una ficha breve para WhatsApp con título, zona, precio, dormitorios y link.';
+      await saveMessage(phone, 'assistant', fichaReply);
+      return res.status(200).json({ response: fichaReply, profile, contactPreference: contactPreference || 'own' });
+    }
 
     if (!searchIntent) {
       const softReply = '¡Dale! Contame qué querés ajustar (zona, tipo de propiedad, operación, precio o dormitorios) y te afino la búsqueda.';
@@ -382,7 +436,7 @@ module.exports = async function handler(req, res) {
       try {
         const direct = await searchProperties(extracted);
         if (direct.items.length > 0) {
-          const seenIds = new Set(readShownIds(history));
+          const seenIds = new Set(readShownIds(rawHistory));
           const freshItems = direct.items.filter((item) => item?.id && !seenIds.has(String(item.id)));
           const selectedItems = (freshItems.length > 0 ? freshItems : direct.items).slice(0, 4);
           const updatedShown = [...seenIds, ...selectedItems.map((item) => String(item.id)).filter(Boolean)];

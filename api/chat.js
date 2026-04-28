@@ -453,6 +453,21 @@ REGLA COMERCIAL:
     const detail = error?.error?.message || error?.message || 'Unknown error';
     const requestId = error?.request_id || error?.error?.request_id || null;
     console.error('ERROR:', detail, requestId ? `request_id=${requestId}` : '');
+
+    if (/Timeout after \d+ms/i.test(detail)) {
+      return res.status(200).json({
+        response: 'La búsqueda tardó demasiado y se cortó. ¿Querés que pruebe con un filtro más acotado (zona exacta + tipo + precio)?',
+        transientError: 'timeout'
+      });
+    }
+
+    if (/rate limit/i.test(detail)) {
+      return res.status(200).json({
+        response: 'Estamos con mucho tráfico en este momento. Probemos de nuevo en unos segundos o con una búsqueda más concreta.',
+        transientError: 'rate_limit'
+      });
+    }
+
     return res.status(500).json({ error: 'Error procesando tu consulta', detail, requestId });
   }
 };

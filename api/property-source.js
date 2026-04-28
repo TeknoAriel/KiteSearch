@@ -31,6 +31,9 @@ function normalizeProperty(item) {
     price: pick(item, ['price', 'price_value', 'prices.main', 'operations.0.price']),
     currency: pick(item, ['currency', 'currency_symbol', 'prices.currency', 'operations.0.currency'], ''),
     bedrooms: pick(item, ['bedrooms', 'rooms', 'room_amount', 'features.bedrooms']),
+    agencyName: pick(item, ['agency_name', 'features.kitepropAgency.name', 'publisher.name']),
+    agencyPhone: pick(item, ['agency_phone', 'features.kitepropAssignedContact.phone_whatsapp', 'features.kitepropAssignedContact.phone']),
+    agencyContactName: pick(item, ['agency_contact_name', 'features.kitepropAssignedContact.full_name']),
     raw: item
   };
 }

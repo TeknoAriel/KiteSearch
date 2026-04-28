@@ -77,7 +77,58 @@ function extractFilters(message) {
   };
 }
 
-function formatPropertiesReply(items) {
+function mergeFilters(base, next) {
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(next || {})) {
+    if (value !== undefined && value !== null && value !== '') merged[key] = value;
+  }
+  return merged;
+}
+
+function extractProfileContext(text) {
+  const lower = String(text || '').toLowerCase();
+  const isAgency = /(inmobiliaria|soy de la inmobiliaria|somos de|corredora|broker inmobiliario)/i.test(lower);
+  const agencyMatch =
+    text.match(/inmobiliaria\s+([a-z0-9 .&-]{3,60})/i) ||
+    text.match(/somos\s+de\s+([a-z0-9 .&-]{3,60})/i) ||
+    text.match(/agencia\s+([a-z0-9 .&-]{3,60})/i);
+  const phoneMatch = text.match(/(\+?\d[\d\s()-]{7,}\d)/);
+  return {
+    isAgency,
+    agencyName: agencyMatch ? agencyMatch[1].trim() : undefined,
+    agencyPhone: phoneMatch ? phoneMatch[1].replace(/\s+/g, ' ').trim() : undefined
+  };
+}
+
+function buildConversationContext(history, message) {
+  const userTexts = history
+    .filter((m) => m.role === 'user')
+    .map((m) => m.content)
+    .slice(-6);
+  userTexts.push(message);
+
+  let filters = { currency_id: 2, status: 'active', limit: 5 };
+  let profile = { clientType: 'individual' };
+
+  for (const text of userTexts) {
+    filters = mergeFilters(filters, extractFilters(text));
+    const extractedProfile = extractProfileContext(text);
+    if (extractedProfile.isAgency) profile.clientType = 'agency';
+    if (extractedProfile.agencyName) profile.agencyName = extractedProfile.agencyName;
+    if (extractedProfile.agencyPhone) profile.agencyPhone = extractedProfile.agencyPhone;
+  }
+
+  return { filters, profile };
+}
+
+function isOwnStock(property, profile) {
+  if (profile.clientType !== 'agency') return true;
+  if (!profile.agencyName) return false;
+  const owner = String(property.agencyName || '').toLowerCase();
+  return owner.includes(String(profile.agencyName).toLowerCase());
+}
+
+function formatPropertiesReply(items, profile) {
   const typeLabel = (rawType) => {
     const type = String(rawType || '').toLowerCase();
     const map = {
@@ -101,14 +152,35 @@ function formatPropertiesReply(items) {
   };
 
   const lines = ['Encontré estas opciones reales para tu búsqueda:'];
+  let hasExternalStock = false;
+  let firstExternal = null;
+
   items.slice(0, 4).forEach((p, i) => {
     const price = p.price != null ? `${p.currency || '$'}${p.price}` : 'consultar';
+    const own = isOwnStock(p, profile);
+    if (!own) {
+      hasExternalStock = true;
+      if (!firstExternal) firstExternal = p;
+    }
     lines.push(`${i + 1}. 🏠 *${typeLabel(p.type)}* en *${p.zone || 'zona no especificada'}*`);
     lines.push(`   💰 ${price} | 🛏️ ${roomsLabel(p.bedrooms)}`);
     lines.push(`   🧾 ${p.title || 'Sin título'}`);
+    if (!own && p.agencyName) {
+      lines.push(`   🤝 Publica: *${p.agencyName}*${p.agencyPhone ? ` (${p.agencyPhone})` : ''}`);
+    }
   });
+
+  if (profile.clientType === 'agency' && hasExternalStock && firstExternal) {
+    lines.push('');
+    lines.push('⚠️ Esta opción no es de stock propio.');
+    if (firstExternal.agencyName) {
+      lines.push(`Corresponde a *${firstExternal.agencyName}*${firstExternal.agencyPhone ? ` (${firstExternal.agencyPhone})` : ''}.`);
+    }
+    lines.push(`Si envío la ficha al cliente, ¿querés que ponga tus datos (${profile.agencyName || 'tu inmobiliaria'}${profile.agencyPhone ? ` - ${profile.agencyPhone}` : ''}) o los de la inmobiliaria publicante?`);
+  }
+
   lines.push('');
-  lines.push('¿Querés que filtre por otra zona, precio o cantidad de dormitorios?');
+  lines.push('¿Querés que siga afinando por zona, precio, dormitorios o amenities?');
   return lines.join('\n');
 }
 
@@ -184,17 +256,21 @@ module.exports = async function handler(req, res) {
     const history = normalizeHistory(await getHistory(phone));
     await saveMessage(phone, 'user', message.trim());
 
-    const extracted = extractFilters(message);
+    const context = buildConversationContext(history, message.trim());
+    const extracted = context.filters;
+    const profile = context.profile;
+
     if (extracted.op_type || extracted.q || extracted.type) {
       try {
         const direct = await searchProperties(extracted);
         if (direct.items.length > 0) {
-          const directReply = formatPropertiesReply(direct.items);
+          const directReply = formatPropertiesReply(direct.items, profile);
           await saveMessage(phone, 'assistant', directReply);
           const newCount = await incrementSearchCount(phone);
           return res.status(200).json({
             response: directReply,
             source: direct.source,
+            profile,
             searchCount: newCount,
             searchLimit: FREE_LIMIT,
             remaining: Math.max(0, FREE_LIMIT - newCount)
@@ -209,7 +285,16 @@ module.exports = async function handler(req, res) {
       anthropic.beta.messages.create({
         model: MODEL,
         max_tokens: 1024,
-        system: SYSTEM_PROMPT,
+        system: `${SYSTEM_PROMPT}
+
+CONTEXTO DE CLIENTE:
+- tipo_cliente: ${profile.clientType}
+- inmobiliaria: ${profile.agencyName || 'no informada'}
+- telefono_inmobiliaria: ${profile.agencyPhone || 'no informado'}
+
+REGLA COMERCIAL:
+- Si tipo_cliente es inmobiliaria y la propiedad no es stock propio, indicá inmobiliaria publicante y contacto.
+- Si se va a enviar ficha al cliente final para una propiedad externa, preguntá si usar datos de la inmobiliaria del usuario o de la publicante.`,
         messages: [...history, { role: 'user', content: message.trim() }],
         mcp_servers: [{
           type: 'url',

@@ -1,8 +1,8 @@
-import { createClient } from '@supabase/supabase-js';
-import Anthropic from '@anthropic-ai/sdk';
+const { createClient } = require('@supabase/supabase-js');
+const Anthropic = require('@anthropic-ai/sdk');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const SYSTEM_PROMPT = `Sos KiteSearch, asistente inmobiliario de KiteProp. Ayudas a encontrar propiedades en Argentina en español rioplatense. Usas emojis y formato WhatsApp con *negrita*. Mostras max 3-4 propiedades y siempre terminás con una pregunta.`;
+const SYSTEM_PROMPT = `Sos KiteSearch, asistente inmobiliario de KiteProp. Ayudas a encontrar propiedades en Argentina en español rioplatense. Usas emojis y formato con negrita. Mostras max 3-4 propiedades y siempre terminas con una pregunta.`;
 async function getOrCreateUser(phone) {
   const { data, error } = await supabase.from('users').select('*').eq('phone', phone).single();
   if (error || !data) { const { data: u } = await supabase.from('users').insert({ phone, search_count: 0, created_at: new Date().toISOString() }).select().single(); return u; }
@@ -22,6 +22,8 @@ async function saveMessage(phone, role, content) {
   await supabase.from('messages').insert({ phone, role, content, created_at: new Date().toISOString() });
 }
 module.exports = async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   const { message, phone = 'demo-user' } = req.body;
   if (!message) return res.status(400).json({ error: 'Message required' });
@@ -36,5 +38,8 @@ module.exports = async function handler(req, res) {
     await saveMessage(phone, 'assistant', reply);
     const newCount = await incrementSearchCount(phone);
     return res.status(200).json({ response: reply, searchCount: newCount, searchLimit: FREE_LIMIT, remaining: Math.max(0, FREE_LIMIT - newCount) });
-  } catch (error) { return res.status(500).json({ error: 'Error procesando tu consulta', detail: error.message }); }
-}
+  } catch (error) {
+    console.error('ERROR:', error.message);
+    return res.status(500).json({ error: 'Error procesando tu consulta', detail: error.message });
+  }
+};

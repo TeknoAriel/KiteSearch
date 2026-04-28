@@ -1,5 +1,14 @@
 const DEFAULT_REST_URL = 'https://www.kiteprop.com/api/v1/properties';
 const DEFAULT_PROPIEYA_TRPC_URL = 'https://www.propieya.com/api/trpc/listing.search';
+const { createClient } = require('@supabase/supabase-js');
+
+const SNAPSHOT_PHONE = '__catalog_snapshot__';
+const SNAPSHOT_ROLE = 'assistant';
+const SNAPSHOT_PREFIX = '__catalog_snapshot_v1__:';
+const SNAPSHOT_MAX_AGE_HOURS = Number.parseInt(process.env.CATALOG_SNAPSHOT_MAX_AGE_HOURS || '26', 10);
+
+const hasSupabaseConfig = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY);
+const supabase = hasSupabaseConfig ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY) : null;
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
@@ -35,6 +44,21 @@ function normalizeProperty(item) {
     agencyPhone: pick(item, ['agency_phone', 'features.kitepropAssignedContact.phone_whatsapp', 'features.kitepropAssignedContact.phone']),
     agencyContactName: pick(item, ['agency_contact_name', 'features.kitepropAssignedContact.full_name']),
     raw: item
+  };
+}
+
+function compactProperty(item) {
+  return {
+    id: item.id,
+    title: item.title,
+    type: item.type,
+    zone: item.zone,
+    price: item.price,
+    currency: item.currency,
+    bedrooms: item.bedrooms,
+    agencyName: item.agencyName,
+    agencyPhone: item.agencyPhone,
+    op_type: item.op_type || pick(item.raw, ['operationType', 'operation_type', 'operation', 'operations.0.type'], '')
   };
 }
 
@@ -252,7 +276,114 @@ async function searchFromPropieYa(filters) {
   return { source: 'propieya_trpc', items: filtered, total: Number(data.total || filtered.length) };
 }
 
+async function readCatalogSnapshot() {
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from('messages')
+    .select('content, created_at')
+    .eq('phone', SNAPSHOT_PHONE)
+    .eq('role', SNAPSHOT_ROLE)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error || !data?.content || !String(data.content).startsWith(SNAPSHOT_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(String(data.content).slice(SNAPSHOT_PREFIX.length));
+    const generatedAt = new Date(parsed.generatedAt || data.created_at);
+    if (Number.isNaN(generatedAt.getTime())) return null;
+    const ageMs = Date.now() - generatedAt.getTime();
+    if (ageMs > SNAPSHOT_MAX_AGE_HOURS * 60 * 60 * 1000) return null;
+    return {
+      generatedAt: generatedAt.toISOString(),
+      items: normalizeArray(parsed.items).map((item) => ({
+        ...item,
+        raw: item.raw || {}
+      }))
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function searchFromSnapshot(filters) {
+  const snapshot = await readCatalogSnapshot();
+  if (!snapshot || snapshot.items.length === 0) {
+    return { source: 'snapshot_cache', items: [], total: 0, generatedAt: null };
+  }
+  const filtered = dedupeListings(sortByIntent(applyFilters(snapshot.items, filters), filters));
+  return {
+    source: 'snapshot_cache',
+    items: filtered,
+    total: filtered.length,
+    generatedAt: snapshot.generatedAt
+  };
+}
+
+async function syncCatalogSnapshot() {
+  if (!supabase) throw new Error('Missing Supabase config');
+  const syncLimit = Number.parseInt(process.env.CATALOG_SNAPSHOT_SYNC_LIMIT || '1500', 10);
+  const bucket = [];
+  let source = 'rest+propieya';
+
+  try {
+    const rest = await searchFromRest({ limit: syncLimit, status: 'active' });
+    bucket.push(...normalizeArray(rest.items));
+    source = rest.source;
+  } catch {
+    // Continue with PropieYa if REST is unavailable.
+  }
+
+  const presets = [
+    { op_type: 'rental', type: 'apartments', q: 'rosario' },
+    { op_type: 'rental', type: 'house', q: 'funes' },
+    { op_type: 'rental', type: 'apartments', q: 'funes' },
+    { op_type: 'sale', type: 'apartments', q: 'rosario' },
+    { op_type: 'sale', type: 'house', q: 'rosario' },
+    { op_type: 'sale', type: 'apartments', q: 'funes' },
+    { op_type: 'rental', type: 'apartments', q: 'centro' },
+    { op_type: 'sale', type: 'apartments', q: 'centro' }
+  ];
+  for (const preset of presets) {
+    try {
+      const r = await searchFromPropieYa({ ...preset, limit: Math.min(50, syncLimit) });
+      bucket.push(...normalizeArray(r.items));
+      source = source.includes('propieya') ? source : `${source}+propieya`;
+    } catch {
+      // Keep collecting from other presets.
+    }
+  }
+
+  const compactItems = dedupeListings(bucket).map(compactProperty);
+  if (!compactItems.length) throw new Error('No live data available for snapshot');
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    source,
+    total: compactItems.length,
+    items: compactItems
+  };
+  const { error } = await supabase.from('messages').insert({
+    phone: SNAPSHOT_PHONE,
+    role: SNAPSHOT_ROLE,
+    content: `${SNAPSHOT_PREFIX}${JSON.stringify(payload)}`,
+    created_at: new Date().toISOString()
+  });
+  if (error) throw error;
+  return {
+    ok: true,
+    source,
+    total: compactItems.length,
+    generatedAt: payload.generatedAt
+  };
+}
+
 async function searchProperties(filters) {
+  try {
+    const snapshot = await searchFromSnapshot(filters);
+    if (snapshot.items.length > 0) return snapshot;
+  } catch {
+    // Ignore snapshot read issues and continue with live sources.
+  }
+
   try {
     const propieya = await searchFromPropieYa(filters);
     if (propieya.items.length > 0) return propieya;
@@ -267,4 +398,4 @@ async function searchProperties(filters) {
   return rest;
 }
 
-module.exports = { searchProperties };
+module.exports = { searchProperties, syncCatalogSnapshot };

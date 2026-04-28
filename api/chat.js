@@ -7,6 +7,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
 const MCP_URL = process.env.KITEPROP_MCP_URL || 'https://mcp.kiteprop.com/mcp';
 const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.CHAT_TIMEOUT_MS || '25000', 10);
+const DB_TIMEOUT_MS = Number.parseInt(process.env.DB_TIMEOUT_MS || '3500', 10);
+const DB_RETRIES = Number.parseInt(process.env.DB_RETRIES || '2', 10);
 const PROFILE_META_PREFIX = '__kitesearch_profile__:';
 const SHOWN_META_PREFIX = '__kitesearch_shown_ids__:';
 const CONTACT_PREF_META_PREFIX = '__kitesearch_contact_pref__:';
@@ -55,6 +57,26 @@ function withTimeout(promise, ms) {
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms))
   ]);
+}
+
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withDbResilience(operation, fallbackValue, label) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= DB_RETRIES; attempt += 1) {
+    try {
+      return await withTimeout(operation(), DB_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error;
+      if (attempt < DB_RETRIES) {
+        await sleep(150 * (attempt + 1));
+      }
+    }
+  }
+  console.error(`DB_WARN ${label}:`, lastError?.message || lastError || 'unknown db error');
+  return fallbackValue;
 }
 
 function extractFilters(message) {
@@ -452,56 +474,120 @@ function formatPropertiesReply(items, profile) {
 }
 
 async function getOrCreateUser(phone) {
-  const { data, error } = await supabase
-    .from('users')
-    .select('*')
-    .eq('phone', phone)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const existing = await withDbResilience(
+    async () => {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('phone', phone)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    null,
+    'getOrCreateUser.select'
+  );
+  if (existing) return existing;
 
-  if (!error && data) return data;
+  const inserted = await withDbResilience(
+    async () => {
+      const { data, error } = await supabase
+        .from('users')
+        .insert({ phone, search_count: 0, created_at: new Date().toISOString() })
+        .select()
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    null,
+    'getOrCreateUser.insert'
+  );
+  if (inserted) return inserted;
 
-  const { data: inserted, error: insertError } = await supabase
-    .from('users')
-    .insert({ phone, search_count: 0, created_at: new Date().toISOString() })
-    .select()
-    .maybeSingle();
-
-  if (!insertError && inserted) return inserted;
-
-  const { data: fallback } = await supabase
-    .from('users')
-    .select('*')
-    .eq('phone', phone)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
+  const fallback = await withDbResilience(
+    async () => {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('phone', phone)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    null,
+    'getOrCreateUser.fallback'
+  );
   if (fallback) return fallback;
 
-  return { phone, search_count: 0, premium: false };
+  return { phone, search_count: 0, premium: false, volatile: true };
 }
 
 async function incrementSearchCount(phone) {
-  const { data: u } = await supabase.from('users').select('search_count').eq('phone', phone).single();
-  const n = (u?.search_count || 0) + 1;
-  await supabase.from('users').update({ search_count: n, last_search: new Date().toISOString() }).eq('phone', phone);
-  return n;
+  const current = await withDbResilience(
+    async () => {
+      const { data, error } = await supabase
+        .from('users')
+        .select('search_count')
+        .eq('phone', phone)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return Number(data?.search_count || 0);
+    },
+    0,
+    'incrementSearchCount.read'
+  );
+
+  const next = current + 1;
+  await withDbResilience(
+    async () => {
+      const { error } = await supabase
+        .from('users')
+        .update({ search_count: next, last_search: new Date().toISOString() })
+        .eq('phone', phone);
+      if (error) throw error;
+      return true;
+    },
+    false,
+    'incrementSearchCount.write'
+  );
+  return next;
 }
 
 async function getHistory(phone) {
-  const { data } = await supabase
-    .from('messages')
-    .select('role, content')
-    .eq('phone', phone)
-    .order('created_at', { ascending: true })
-    .limit(20);
-  return data || [];
+  return withDbResilience(
+    async () => {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('role, content')
+        .eq('phone', phone)
+        .order('created_at', { ascending: true })
+        .limit(20);
+      if (error) throw error;
+      return data || [];
+    },
+    [],
+    'getHistory'
+  );
 }
 
 async function saveMessage(phone, role, content) {
-  await supabase.from('messages').insert({ phone, role, content, created_at: new Date().toISOString() });
+  await withDbResilience(
+    async () => {
+      const { error } = await supabase
+        .from('messages')
+        .insert({ phone, role, content, created_at: new Date().toISOString() });
+      if (error) throw error;
+      return true;
+    },
+    false,
+    'saveMessage'
+  );
 }
 
 module.exports = async function handler(req, res) {

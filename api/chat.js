@@ -168,6 +168,47 @@ function evaluateSearchReadiness(filters) {
   return missing;
 }
 
+function compactSearchSummary(filters) {
+  const opLabel = filters?.op_type === 'sale' ? 'venta' : 'alquiler';
+  const typeLabelMap = {
+    apartments: 'departamento',
+    house: 'casa',
+    ph: 'PH',
+    office: 'oficina/local',
+    land: 'terreno/lote'
+  };
+  const typeLabel = typeLabelMap[filters?.type] || 'propiedad';
+  const parts = [`${typeLabel} en ${opLabel}`];
+  if (filters?.q) parts.push(`zona/localidad: ${filters.q}`);
+  if (filters?.price_max) parts.push(`presupuesto hasta ${filters.price_max}`);
+  if (typeof filters?.bedrooms === 'number') parts.push(`mínimo ${filters.bedrooms} dormitorios`);
+  return parts.join(' | ');
+}
+
+function buildNoResultsReply(filters, hints = {}) {
+  const lines = [
+    'No encontré resultados exactos con este filtro:',
+    `- ${compactSearchSummary(filters)}`,
+    ''
+  ];
+  if (hints.withoutBedrooms > 0) {
+    lines.push(`- Si quitamos dormitorios, aparecen *${hints.withoutBedrooms}* opciones.`);
+  }
+  if (hints.withoutPrice > 0) {
+    lines.push(`- Si ampliamos presupuesto, aparecen *${hints.withoutPrice}* opciones.`);
+  }
+  lines.push('¿Querés que lo abra por *zona cercana*, *precio mayor* o *otro tipo de propiedad*?');
+  return lines.join('\n');
+}
+
+function buildNoMoreFreshReply(filters, total) {
+  return [
+    `Ya te mostré las opciones disponibles para: ${compactSearchSummary(filters)}.`,
+    total > 0 ? `En total encontré ${total} resultados para ese criterio.` : '',
+    'Si querés nuevos avisos, cambiemos al menos uno de estos filtros: zona, precio, dormitorios o tipo.'
+  ].filter(Boolean).join('\n');
+}
+
 function buildQualificationReply(missing, filters) {
   const labels = {
     operacion: 'operación (*alquiler* o *venta*)',
@@ -213,6 +254,10 @@ function isSearchIntent(message, filters) {
     Boolean(filters?.price_max);
   const searchVerb = /(busco|buscar|quiero|necesito|mostrame|mostrar|filtr|venta|alquiler|zona|dormitorio|ambiente)/i.test(text);
   return hasFilter || searchVerb;
+}
+
+function isMarketIntent(message) {
+  return /(precio(s)? de mercado|tasaci[oó]n|valor por m2|an[aá]lisis de mercado)/i.test(String(message || '').toLowerCase());
 }
 
 function mergeFilters(base, next) {
@@ -557,7 +602,20 @@ module.exports = async function handler(req, res) {
         if (direct.items.length > 0) {
           const seenIds = new Set(readShownIds(rawHistory));
           const freshItems = direct.items.filter((item) => item?.id && !seenIds.has(String(item.id)));
-          const selectedItems = (freshItems.length > 0 ? freshItems : direct.items).slice(0, 4);
+          if (freshItems.length === 0) {
+            const noMoreReply = buildNoMoreFreshReply(extracted, direct.total || direct.items.length);
+            await saveMessage(phone, 'assistant', noMoreReply);
+            const newCount = await incrementSearchCount(phone);
+            return res.status(200).json({
+              response: noMoreReply,
+              source: direct.source,
+              profile,
+              searchCount: newCount,
+              searchLimit: FREE_LIMIT,
+              remaining: Math.max(0, FREE_LIMIT - newCount)
+            });
+          }
+          const selectedItems = freshItems.slice(0, 4);
           const updatedShown = [...seenIds, ...selectedItems.map((item) => String(item.id)).filter(Boolean)];
           await persistShownIds(phone, updatedShown);
 
@@ -573,9 +631,44 @@ module.exports = async function handler(req, res) {
             remaining: Math.max(0, FREE_LIMIT - newCount)
           });
         }
+        const relaxedBase = { ...extracted };
+        const withoutBedroomsFilters = { ...relaxedBase };
+        delete withoutBedroomsFilters.bedrooms;
+        const withoutPriceFilters = { ...relaxedBase };
+        delete withoutPriceFilters.price_max;
+        const [withoutBedrooms, withoutPrice] = await Promise.all([
+          searchProperties(withoutBedroomsFilters).catch(() => ({ total: 0, items: [] })),
+          searchProperties(withoutPriceFilters).catch(() => ({ total: 0, items: [] }))
+        ]);
+        const noResultsReply = buildNoResultsReply(extracted, {
+          withoutBedrooms: Number(withoutBedrooms?.total || withoutBedrooms?.items?.length || 0),
+          withoutPrice: Number(withoutPrice?.total || withoutPrice?.items?.length || 0)
+        });
+        await saveMessage(phone, 'assistant', noResultsReply);
+        const newCount = await incrementSearchCount(phone);
+        return res.status(200).json({
+          response: noResultsReply,
+          source: direct.source,
+          profile,
+          searchCount: newCount,
+          searchLimit: FREE_LIMIT,
+          remaining: Math.max(0, FREE_LIMIT - newCount),
+          quickOptions: [
+            { id: 'broaden_zone', label: 'Ampliar zona', value: 'ampliar zona cercana' },
+            { id: 'raise_budget', label: 'Subir presupuesto', value: 'subir presupuesto' },
+            { id: 'change_type', label: 'Cambiar tipo', value: 'quiero otro tipo de propiedad' }
+          ]
+        });
       } catch (err) {
         console.error('Direct search fallback failed:', err?.message || err);
+        return res.status(500).json({ error: 'Error consultando catálogo', detail: err?.message || 'Unknown catalog error' });
       }
+    }
+
+    if (!isMarketIntent(message.trim())) {
+      const strictReply = 'Para mantener precisión, solo respondo con búsquedas verificables del catálogo. Decime operación, zona, tipo y presupuesto y te doy resultados reales.';
+      await saveMessage(phone, 'assistant', strictReply);
+      return res.status(200).json({ response: strictReply, profile });
     }
 
     const response = await withTimeout(

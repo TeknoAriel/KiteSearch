@@ -48,6 +48,29 @@ function containsInsensitive(haystack, needle) {
   return String(haystack || '').toLowerCase().includes(String(needle || '').toLowerCase());
 }
 
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function queryMatchesProperty(property, rawQuery) {
+  const query = normalizeText(rawQuery).trim();
+  if (!query) return true;
+  const hay = normalizeText([
+    property.title,
+    property.zone,
+    pick(property.raw, ['address.neighborhood', 'address.locality', 'address.city'], '')
+  ].join(' '));
+  if (hay.includes(query)) return true;
+  const terms = query.split(/\s+/).filter((t) => t.length >= 3);
+  if (terms.length === 0) return true;
+  const matches = terms.filter((term) => hay.includes(term));
+  const required = terms.length >= 3 ? 2 : 1;
+  return matches.length >= required;
+}
+
 function applyFilters(items, filters) {
   const normalizeOperation = (value) => {
     const v = String(value || '').toLowerCase();
@@ -66,7 +89,7 @@ function applyFilters(items, filters) {
   const normalizedOp = normalizeOperation(filters.op_type);
   const normalizedType = filters.type === 'apartments' ? 'apartment' : filters.type;
   return items.filter((p) => {
-    if (filters.q && !containsInsensitive(`${p.title} ${p.zone}`, filters.q)) return false;
+    if (filters.q && !queryMatchesProperty(p, filters.q)) return false;
     if (normalizedOp) {
       const op = normalizeOperation(p.op_type || pick(p.raw, ['op_type', 'operation_type', 'operation', 'operations.0.type'], ''));
       if (!op || op !== normalizedOp) return false;

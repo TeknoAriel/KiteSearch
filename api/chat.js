@@ -8,6 +8,7 @@ const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
 const MCP_URL = process.env.KITEPROP_MCP_URL || 'https://mcp.kiteprop.com/mcp';
 const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.CHAT_TIMEOUT_MS || '25000', 10);
 const PROFILE_META_PREFIX = '__kitesearch_profile__:';
+const SHOWN_META_PREFIX = '__kitesearch_shown_ids__:';
 
 const SYSTEM_PROMPT = `Sos KiteSearch, el asistente inmobiliario inteligente de KiteProp.
 
@@ -41,7 +42,8 @@ function normalizeHistory(history) {
       (item.role === 'user' || item.role === 'assistant') &&
       typeof item.content === 'string' &&
       item.content.trim() &&
-      !String(item.content).startsWith(PROFILE_META_PREFIX)
+      !String(item.content).startsWith(PROFILE_META_PREFIX) &&
+      !String(item.content).startsWith(SHOWN_META_PREFIX)
     )
     .map((item) => ({ role: item.role, content: item.content }));
 }
@@ -57,11 +59,15 @@ function extractFilters(message) {
   const text = String(message || '').toLowerCase();
   const bedroomsMatch = text.match(/(\d+)\s*(dorm|dormitorio|habit)/);
   const priceMatch = text.match(/(?:hasta|tope|max(?:imo)?)\s*\$?\s*([\d\.\,]+)/);
-  const qWords = [];
-  if (text.includes('rosario')) qWords.push('rosario');
-  if (text.includes('caba')) qWords.push('caba');
-  if (text.includes('buenos aires')) qWords.push('buenos aires');
-  const q = qWords.join(' ').trim() || undefined;
+  const zoneMatch = text.match(/zona\s+([a-záéíóúñ0-9 ]{3,40})/i);
+  const cityWords = [];
+  if (text.includes('rosario')) cityWords.push('rosario');
+  if (text.includes('caba')) cityWords.push('caba');
+  if (text.includes('buenos aires')) cityWords.push('buenos aires');
+  if (text.includes('cordoba')) cityWords.push('cordoba');
+  if (text.includes('mendoza')) cityWords.push('mendoza');
+  if (zoneMatch) cityWords.push(zoneMatch[1].trim());
+  const q = cityWords.join(' ').trim() || undefined;
 
   const normalizePrice = (raw) => {
     if (!raw) return undefined;
@@ -71,16 +77,39 @@ function extractFilters(message) {
     return Number.isFinite(n) ? n : undefined;
   };
 
+  const detectType = () => {
+    if (/(depto|departamento)/i.test(text)) return 'apartments';
+    if (/\bcasa(s)?\b/i.test(text)) return 'house';
+    if (/\bph\b/i.test(text)) return 'ph';
+    if (/(oficina|local|consultorio)/i.test(text)) return 'office';
+    if (/(terreno|lote)/i.test(text)) return 'land';
+    return undefined;
+  };
+
   return {
     q,
     op_type: text.includes('alquiler') ? 'rental' : (text.includes('venta') ? 'sale' : undefined),
-    type: text.includes('depto') || text.includes('departamento') ? 'apartments' : undefined,
+    type: detectType(),
     bedrooms: bedroomsMatch ? Number(bedroomsMatch[1]) : undefined,
     price_max: normalizePrice(priceMatch?.[1]),
     currency_id: 2,
     status: 'active',
     limit: 5
   };
+}
+
+function isSearchIntent(message, filters) {
+  const text = String(message || '').toLowerCase().trim();
+  const greetingOnly = /^(hola|buenas|buen día|buen dia|ok|dale|gracias)$/i.test(text);
+  if (greetingOnly) return false;
+  const hasFilter =
+    Boolean(filters?.q) ||
+    Boolean(filters?.type) ||
+    Boolean(filters?.op_type) ||
+    Boolean(filters?.bedrooms) ||
+    Boolean(filters?.price_max);
+  const searchVerb = /(busco|buscar|quiero|necesito|mostrame|mostrar|filtr|venta|alquiler|zona|dormitorio|ambiente)/i.test(text);
+  return hasFilter || searchVerb;
 }
 
 function mergeFilters(base, next) {
@@ -161,6 +190,24 @@ async function persistProfile(phone, profile) {
     agencyPhone: profile?.agencyPhone || null
   };
   await saveMessage(phone, 'assistant', `${PROFILE_META_PREFIX}${JSON.stringify(payload)}`);
+}
+
+function readShownIds(history) {
+  const metadata = [...history]
+    .reverse()
+    .find((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content.startsWith(SHOWN_META_PREFIX));
+  if (!metadata) return [];
+  try {
+    const parsed = JSON.parse(metadata.content.slice(SHOWN_META_PREFIX.length));
+    return Array.isArray(parsed?.ids) ? parsed.ids.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function persistShownIds(phone, ids) {
+  const unique = [...new Set((ids || []).map(String))].slice(-40);
+  await saveMessage(phone, 'assistant', `${SHOWN_META_PREFIX}${JSON.stringify({ ids: unique })}`);
 }
 
 function isOwnStock(property, profile) {
@@ -303,12 +350,25 @@ module.exports = async function handler(req, res) {
     const persistedProfile = readPersistedProfile(history);
     const profile = mergeProfile(persistedProfile, context.profile);
     await persistProfile(phone, profile);
+    const searchIntent = isSearchIntent(message.trim(), extracted);
 
-    if (extracted.op_type || extracted.q || extracted.type) {
+    if (!searchIntent) {
+      const softReply = '¡Dale! Contame qué querés ajustar (zona, tipo de propiedad, operación, precio o dormitorios) y te afino la búsqueda.';
+      await saveMessage(phone, 'assistant', softReply);
+      return res.status(200).json({ response: softReply, profile });
+    }
+
+    if (searchIntent) {
       try {
         const direct = await searchProperties(extracted);
         if (direct.items.length > 0) {
-          const directReply = formatPropertiesReply(direct.items, profile);
+          const seenIds = new Set(readShownIds(history));
+          const freshItems = direct.items.filter((item) => item?.id && !seenIds.has(String(item.id)));
+          const selectedItems = (freshItems.length > 0 ? freshItems : direct.items).slice(0, 4);
+          const updatedShown = [...seenIds, ...selectedItems.map((item) => String(item.id)).filter(Boolean)];
+          await persistShownIds(phone, updatedShown);
+
+          const directReply = formatPropertiesReply(selectedItems, profile);
           await saveMessage(phone, 'assistant', directReply);
           const newCount = await incrementSearchCount(phone);
           return res.status(200).json({

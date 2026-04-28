@@ -12,6 +12,7 @@ const DB_RETRIES = Number.parseInt(process.env.DB_RETRIES || '2', 10);
 const PROFILE_META_PREFIX = '__kitesearch_profile__:';
 const SHOWN_META_PREFIX = '__kitesearch_shown_ids__:';
 const CONTACT_PREF_META_PREFIX = '__kitesearch_contact_pref__:';
+const FILTERS_META_PREFIX = '__kitesearch_filters__:';
 
 const SYSTEM_PROMPT = `Sos KiteSearch, el asistente inmobiliario inteligente de KiteProp.
 
@@ -47,7 +48,8 @@ function normalizeHistory(history) {
       item.content.trim() &&
       !String(item.content).startsWith(PROFILE_META_PREFIX) &&
       !String(item.content).startsWith(SHOWN_META_PREFIX) &&
-      !String(item.content).startsWith(CONTACT_PREF_META_PREFIX)
+      !String(item.content).startsWith(CONTACT_PREF_META_PREFIX) &&
+      !String(item.content).startsWith(FILTERS_META_PREFIX)
     )
     .map((item) => ({ role: item.role, content: item.content }));
 }
@@ -80,12 +82,20 @@ async function withDbResilience(operation, fallbackValue, label) {
 }
 
 function extractFilters(message) {
-  const text = String(message || '').toLowerCase();
+  const text = String(message || '')
+    .toLowerCase()
+    .replace(/\bu\$d\b/g, 'usd')
+    .replace(/\bus\$\b/g, 'usd')
+    .replace(/\bdto\b/g, 'depto')
+    .replace(/\bdpto\b/g, 'depto');
   const compact = text.replace(/[\n\r,;]+/g, ' ').replace(/\s+/g, ' ').trim();
   const bedroomsMatch = text.match(/(\d+)\s*(dorm|dormitorio|habit)/);
   const ambientesMatch = text.match(/(\d+)\s*(amb|ambiente)/);
   const priceMatch = compact.match(/(?:hasta|tope|max(?:imo)?|de|por|presupuesto)\s*\$?\s*([\d\.\,]+)\s*(k|mil|m)?/i);
   const standalonePriceMatch = compact.match(/\b(\d{3,7})\s*(k|mil|m)\b/i) || compact.match(/\b(\d{5,9})\b/);
+  const amountWithCurrencyMatch =
+    compact.match(/\b(\d{4,9})\s*(usd|ars|pesos?)\b/i) ||
+    compact.match(/\b(usd|ars|pesos?)\s*(\d{4,9})\b/i);
   const zoneMatch = compact.match(/zona\s+([a-záéíóúñ0-9 ]{3,40})/i);
   const enMatch = compact.match(/\ben\s+([a-záéíóúñ0-9 ]{3,40})/i);
   const rawLines = String(message || '')
@@ -154,8 +164,9 @@ function extractFilters(message) {
   };
   const parsedBudget =
     normalizePrice(priceMatch?.[1], priceMatch?.[2]) ||
-    normalizePrice(standalonePriceMatch?.[1], standalonePriceMatch?.[2]);
-  const currencyHint = /(usd|u\$d|d[oó]lar|dolares)/i.test(compact)
+    normalizePrice(standalonePriceMatch?.[1], standalonePriceMatch?.[2]) ||
+    normalizePrice(amountWithCurrencyMatch?.[1] || amountWithCurrencyMatch?.[2], undefined);
+  const currencyHint = /(usd|d[oó]lar|dolares)/i.test(compact)
     ? 'USD'
     : (/(ars|peso|\$)/i.test(compact) ? 'ARS' : undefined);
 
@@ -305,14 +316,14 @@ function extractProfileContext(text) {
   };
 }
 
-function buildConversationContext(history, message) {
+function buildConversationContext(history, message, seedFilters = null) {
   const userTexts = history
     .filter((m) => m.role === 'user')
     .map((m) => m.content)
     .slice(-6);
   userTexts.push(message);
 
-  let filters = { currency_id: 2, status: 'active', limit: 5 };
+  let filters = mergeFilters({ currency_id: 2, status: 'active', limit: 5 }, seedFilters || {});
   let profile = { clientType: 'individual' };
 
   for (const text of userTexts) {
@@ -324,6 +335,34 @@ function buildConversationContext(history, message) {
   }
 
   return { filters, profile };
+}
+
+function readPersistedFilters(history) {
+  const metadata = [...history]
+    .reverse()
+    .find((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content.startsWith(FILTERS_META_PREFIX));
+  if (!metadata) return null;
+  try {
+    const parsed = JSON.parse(metadata.content.slice(FILTERS_META_PREFIX.length));
+    if (!parsed || typeof parsed !== 'object') return null;
+    const out = {};
+    for (const key of ['q', 'op_type', 'type', 'bedrooms', 'price_max', 'currency_hint']) {
+      if (parsed[key] !== undefined && parsed[key] !== null && parsed[key] !== '') out[key] = parsed[key];
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+async function persistFilters(phone, filters) {
+  if (!filters || typeof filters !== 'object') return;
+  const payload = {};
+  for (const key of ['q', 'op_type', 'type', 'bedrooms', 'price_max', 'currency_hint']) {
+    if (filters[key] !== undefined && filters[key] !== null && filters[key] !== '') payload[key] = filters[key];
+  }
+  if (Object.keys(payload).length === 0) return;
+  await saveMessage(phone, 'assistant', `${FILTERS_META_PREFIX}${JSON.stringify(payload)}`);
 }
 
 function readPersistedProfile(history) {
@@ -630,7 +669,8 @@ module.exports = async function handler(req, res) {
     const history = normalizeHistory(rawHistory);
     await saveMessage(phone, 'user', message.trim());
 
-    const context = buildConversationContext(history, message.trim());
+    const persistedFilters = readPersistedFilters(rawHistory);
+    const context = buildConversationContext(history, message.trim(), persistedFilters);
     const extracted = context.filters;
     const persistedProfile = readPersistedProfile(rawHistory);
     const profile = mergeProfile(persistedProfile, context.profile);
@@ -674,6 +714,7 @@ module.exports = async function handler(req, res) {
         ]
         : [];
       await saveMessage(phone, 'assistant', qualificationReply);
+      await persistFilters(phone, extracted);
       return res.status(200).json({
         response: qualificationReply,
         profile,
@@ -704,6 +745,7 @@ module.exports = async function handler(req, res) {
           const selectedItems = freshItems.slice(0, 4);
           const updatedShown = [...seenIds, ...selectedItems.map((item) => String(item.id)).filter(Boolean)];
           await persistShownIds(phone, updatedShown);
+          await persistFilters(phone, extracted);
 
           const directReply = formatPropertiesReply(selectedItems, profile);
           await saveMessage(phone, 'assistant', directReply);
@@ -731,6 +773,7 @@ module.exports = async function handler(req, res) {
           withoutPrice: Number(withoutPrice?.total || withoutPrice?.items?.length || 0)
         });
         await saveMessage(phone, 'assistant', noResultsReply);
+        await persistFilters(phone, extracted);
         const newCount = await incrementSearchCount(phone);
         return res.status(200).json({
           response: noResultsReply,

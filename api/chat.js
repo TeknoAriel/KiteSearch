@@ -59,13 +59,24 @@ function withTimeout(promise, ms) {
 
 function extractFilters(message) {
   const text = String(message || '').toLowerCase();
+  const compact = text.replace(/[\n\r,;]+/g, ' ').replace(/\s+/g, ' ').trim();
   const bedroomsMatch = text.match(/(\d+)\s*(dorm|dormitorio|habit)/);
   const ambientesMatch = text.match(/(\d+)\s*(amb|ambiente)/);
-  const priceMatch = text.match(/(?:hasta|tope|max(?:imo)?|de|por|presupuesto)\s*\$?\s*([\d\.\,]+)\s*(k|mil|m)?/i);
-  const zoneMatch = text.match(/zona\s+([a-záéíóúñ0-9 ]{3,40})/i);
-  const enMatch = text.match(/\ben\s+([a-záéíóúñ0-9 ]{3,40})/i);
+  const priceMatch = compact.match(/(?:hasta|tope|max(?:imo)?|de|por|presupuesto)\s*\$?\s*([\d\.\,]+)\s*(k|mil|m)?/i);
+  const standalonePriceMatch = compact.match(/\b(\d{3,7})\s*(k|mil|m)\b/i) || compact.match(/\b(\d{5,9})\b/);
+  const zoneMatch = compact.match(/zona\s+([a-záéíóúñ0-9 ]{3,40})/i);
+  const enMatch = compact.match(/\ben\s+([a-záéíóúñ0-9 ]{3,40})/i);
+  const rawLines = String(message || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
   const cityWords = [];
+  const knownLocalities = [
+    'rosario', 'funes', 'roldan', 'caba', 'buenos aires', 'cordoba', 'mendoza',
+    'montevideo', 'punta del este', 'santiago', 'las condes', 'vitacura', 'nunoa'
+  ];
   if (text.includes('rosario')) cityWords.push('rosario');
+  if (text.includes('funes')) cityWords.push('funes');
   if (text.includes('caba')) cityWords.push('caba');
   if (text.includes('buenos aires')) cityWords.push('buenos aires');
   if (text.includes('cordoba')) cityWords.push('cordoba');
@@ -80,6 +91,23 @@ function extractFilters(message) {
 
   if (zoneMatch && isValidLocationPhrase(zoneMatch[1])) cityWords.push(zoneMatch[1].trim());
   if (enMatch && isValidLocationPhrase(enMatch[1])) cityWords.push(enMatch[1].trim());
+  if (cityWords.length === 0) {
+    for (const line of rawLines) {
+      const lowerLine = line.toLowerCase();
+      const known = knownLocalities.find((loc) => lowerLine.includes(loc));
+      if (known) {
+        cityWords.push(known);
+        break;
+      }
+      if (
+        isValidLocationPhrase(lowerLine) &&
+        !/(alquiler|venta|depto|departamento|casa|ph|oficina|terreno|presupuesto|dormitorio|ambiente|\d)/i.test(lowerLine)
+      ) {
+        cityWords.push(lowerLine);
+        break;
+      }
+    }
+  }
   const q = cityWords.join(' ').trim() || undefined;
 
   const normalizePrice = (raw, suffix) => {
@@ -92,6 +120,9 @@ function extractFilters(message) {
     if (s === 'm') n *= 1000000;
     return Number.isFinite(n) ? n : undefined;
   };
+  const parsedBudget =
+    normalizePrice(priceMatch?.[1], priceMatch?.[2]) ||
+    normalizePrice(standalonePriceMatch?.[1], standalonePriceMatch?.[2]);
 
   const detectType = () => {
     if (/(depto|departamento)/i.test(text)) return 'apartments';
@@ -107,7 +138,7 @@ function extractFilters(message) {
     op_type: /(alquiler|alquilar|arriendo|arrendar|rent)/i.test(text) ? 'rental' : (/(venta|vender|sale)/i.test(text) ? 'sale' : undefined),
     type: detectType(),
     bedrooms: text.includes('monoambiente') ? 0 : (bedroomsMatch ? Number(bedroomsMatch[1]) : (ambientesMatch ? Math.max(0, Number(ambientesMatch[1]) - 1) : undefined)),
-    price_max: normalizePrice(priceMatch?.[1], priceMatch?.[2]),
+    price_max: parsedBudget,
     currency_id: 2,
     status: 'active',
     limit: 5

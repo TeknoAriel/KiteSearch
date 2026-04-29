@@ -6,6 +6,7 @@
     { "src": "api/catalog-status.js", "use": "@vercel/node" },
     { "src": "api/catalog-sync.js", "use": "@vercel/node" },
     { "src": "api/search.js", "use": "@vercel/node" },
+    { "src": "api/search-quality.js", "use": "@vercel/node" },
     { "src": "index.html", "use": "@vercel/static" }
   ],
   "routes": [
@@ -14,6 +15,7 @@
     { "src": "/api/catalog-status", "dest": "/api/catalog-status.js" },
     { "src": "/api/catalog-sync", "dest": "/api/catalog-sync.js" },
     { "src": "/api/search", "dest": "/api/search.js" },
+    { "src": "/api/search-quality", "dest": "/api/search-quality.js" },
     { "src": "/", "dest": "/index.html" }
   ],
   "crons": [

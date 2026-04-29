@@ -1,0 +1,30 @@
+{
+  "normalizations": {
+    "u$d": "usd",
+    "us$": "usd",
+    "dpto": "depto",
+    "dto": "depto",
+    "dormis": "dormitorios",
+    "amb": "ambiente"
+  },
+  "knownLocalities": [
+    "rosario",
+    "funes",
+    "roldan",
+    "caba",
+    "buenos aires",
+    "cordoba",
+    "mendoza",
+    "echesortu",
+    "arroyito",
+    "abasto",
+    "centro"
+  ],
+  "typeSynonyms": {
+    "apartments": ["depto", "departamento", "monoambiente", "duplex"],
+    "house": ["casa", "casaquinta", "casona"],
+    "ph": ["ph"],
+    "office": ["oficina", "local", "consultorio"],
+    "land": ["terreno", "lote"]
+  }
+}

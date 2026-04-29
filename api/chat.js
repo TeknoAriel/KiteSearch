@@ -1,6 +1,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const Anthropic = require('@anthropic-ai/sdk');
 const { searchProperties } = require('./property-source');
+const synonymsConfig = require('../config/synonyms.json');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -13,6 +14,8 @@ const PROFILE_META_PREFIX = '__kitesearch_profile__:';
 const SHOWN_META_PREFIX = '__kitesearch_shown_ids__:';
 const CONTACT_PREF_META_PREFIX = '__kitesearch_contact_pref__:';
 const FILTERS_META_PREFIX = '__kitesearch_filters__:';
+const TERM_MEMORY_META_PREFIX = '__kitesearch_term_memory__:';
+const QUALITY_META_PREFIX = '__kitesearch_quality__:';
 
 const SYSTEM_PROMPT = `Sos KiteSearch, el asistente inmobiliario inteligente de KiteProp.
 
@@ -49,7 +52,9 @@ function normalizeHistory(history) {
       !String(item.content).startsWith(PROFILE_META_PREFIX) &&
       !String(item.content).startsWith(SHOWN_META_PREFIX) &&
       !String(item.content).startsWith(CONTACT_PREF_META_PREFIX) &&
-      !String(item.content).startsWith(FILTERS_META_PREFIX)
+      !String(item.content).startsWith(FILTERS_META_PREFIX) &&
+      !String(item.content).startsWith(TERM_MEMORY_META_PREFIX) &&
+      !String(item.content).startsWith(QUALITY_META_PREFIX)
     )
     .map((item) => ({ role: item.role, content: item.content }));
 }
@@ -82,12 +87,11 @@ async function withDbResilience(operation, fallbackValue, label) {
 }
 
 function extractFilters(message) {
-  const text = String(message || '')
-    .toLowerCase()
-    .replace(/\bu\$d\b/g, 'usd')
-    .replace(/\bus\$\b/g, 'usd')
-    .replace(/\bdto\b/g, 'depto')
-    .replace(/\bdpto\b/g, 'depto');
+  const normalizations = synonymsConfig?.normalizations || {};
+  let text = String(message || '').toLowerCase();
+  for (const [from, to] of Object.entries(normalizations)) {
+    text = text.replace(new RegExp(`\\b${from}\\b`, 'gi'), String(to));
+  }
   const compact = text.replace(/[\n\r,;]+/g, ' ').replace(/\s+/g, ' ').trim();
   const bedroomsMatch = text.match(/(\d+)\s*(dorm|dormitorio|habit)/);
   const ambientesMatch = text.match(/(\d+)\s*(amb|ambiente)/);
@@ -103,10 +107,9 @@ function extractFilters(message) {
     .map((l) => l.trim())
     .filter(Boolean);
   const cityWords = [];
-  const knownLocalities = [
-    'rosario', 'funes', 'roldan', 'caba', 'buenos aires', 'cordoba', 'mendoza',
-    'montevideo', 'punta del este', 'santiago', 'las condes', 'vitacura', 'nunoa'
-  ];
+  const knownLocalities = Array.isArray(synonymsConfig?.knownLocalities) && synonymsConfig.knownLocalities.length
+    ? synonymsConfig.knownLocalities
+    : ['rosario', 'funes', 'roldan', 'caba', 'buenos aires', 'cordoba', 'mendoza', 'montevideo'];
   if (text.includes('rosario')) cityWords.push('rosario');
   if (text.includes('funes')) cityWords.push('funes');
   if (text.includes('caba')) cityWords.push('caba');
@@ -125,13 +128,16 @@ function extractFilters(message) {
   const isValidLocationPhrase = (v) => {
     const s = String(v || '').trim().toLowerCase();
     if (!s) return false;
-    if (/(alquiler|venta|depto|departamento|casa|ph|oficina|terreno|presupuesto|dormitorio|ambiente)/i.test(s)) return false;
+    if (/(alquiler|venta|depto|departamento|casa|ph|oficina|terreno|presupuesto|dormitorio|ambiente|zona)/i.test(s)) return false;
     if (/^\d+$/.test(s)) return false;
     return true;
   };
 
   if (zoneMatch && isValidLocationPhrase(zoneMatch[1])) cityWords.push(zoneMatch[1].trim());
-  if (enMatch && isValidLocationPhrase(enMatch[1])) cityWords.push(enMatch[1].trim());
+  if (enMatch) {
+    const enValue = String(enMatch[1] || '').replace(/^zona\s+/i, '').trim();
+    if (isValidLocationPhrase(enValue)) cityWords.push(enValue);
+  }
   if (cityWords.length === 0) {
     for (const line of rawLines) {
       const lowerLine = line.toLowerCase();
@@ -150,7 +156,7 @@ function extractFilters(message) {
     }
   }
   localityDetails.forEach((d) => cityWords.push(d));
-  const q = cityWords.join(' ').trim() || undefined;
+  const q = [...new Set(cityWords.map((w) => String(w || '').trim()).filter(Boolean))].join(' ').trim() || undefined;
 
   const normalizePrice = (raw, suffix) => {
     if (!raw) return undefined;
@@ -171,6 +177,12 @@ function extractFilters(message) {
     : (/(ars|peso|\$)/i.test(compact) ? 'ARS' : undefined);
 
   const detectType = () => {
+    const typeSynonyms = synonymsConfig?.typeSynonyms || {};
+    for (const [canonical, aliases] of Object.entries(typeSynonyms)) {
+      if (Array.isArray(aliases) && aliases.some((alias) => new RegExp(`\\b${alias}\\b`, 'i').test(text))) {
+        return canonical;
+      }
+    }
     if (/(depto|departamento)/i.test(text)) return 'apartments';
     if (/\bcasa(s)?\b/i.test(text)) return 'house';
     if (/\bph\b/i.test(text)) return 'ph';
@@ -294,9 +306,25 @@ function isMarketIntent(message) {
 }
 
 function mergeFilters(base, next) {
+  const mergeLocation = (prevQ, nextQ) => {
+    const prev = String(prevQ || '').trim().toLowerCase();
+    const nextValue = String(nextQ || '').trim().toLowerCase();
+    if (!nextValue) return prevQ;
+    if (!prev) return nextQ;
+    const genericZones = new Set(['centro', 'norte', 'sur', 'oeste', 'este', 'macrocentro']);
+    const nextTerms = nextValue.split(/\s+/).filter(Boolean);
+    const allGeneric = nextTerms.length > 0 && nextTerms.every((term) => genericZones.has(term));
+    if ((genericZones.has(nextValue) || allGeneric) && !prev.includes(nextTerms[0])) return `${prev} ${nextTerms.join(' ')}`.trim();
+    return nextQ;
+  };
   const merged = { ...base };
   for (const [key, value] of Object.entries(next || {})) {
-    if (value !== undefined && value !== null && value !== '') merged[key] = value;
+    if (value === undefined || value === null || value === '') continue;
+    if (key === 'q') {
+      merged[key] = mergeLocation(merged[key], value);
+    } else {
+      merged[key] = value;
+    }
   }
   return merged;
 }
@@ -363,6 +391,53 @@ async function persistFilters(phone, filters) {
   }
   if (Object.keys(payload).length === 0) return;
   await saveMessage(phone, 'assistant', `${FILTERS_META_PREFIX}${JSON.stringify(payload)}`);
+}
+
+function readTermMemory(history) {
+  const metadata = [...history]
+    .reverse()
+    .find((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content.startsWith(TERM_MEMORY_META_PREFIX));
+  if (!metadata) return {};
+  try {
+    const parsed = JSON.parse(metadata.content.slice(TERM_MEMORY_META_PREFIX.length));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function extractTermsForMemory(message, filters) {
+  const tokens = String(message || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && !/^(busco|quiero|venta|alquiler|zona|tipo|precio|hasta|dormitorio|dormitorios)$/.test(t));
+  const terms = new Set(tokens);
+  if (filters?.q) {
+    String(filters.q).split(/\s+/).forEach((t) => t && terms.add(t.toLowerCase()));
+  }
+  return [...terms].slice(0, 30);
+}
+
+async function persistTermMemory(phone, currentMemory, message, filters) {
+  const next = { ...(currentMemory || {}) };
+  for (const term of extractTermsForMemory(message, filters)) {
+    next[term] = Number(next[term] || 0) + 1;
+  }
+  const compact = Object.entries(next)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 100)
+    .reduce((acc, [k, v]) => ({ ...acc, [k]: v }), {});
+  await saveMessage(phone, 'assistant', `${TERM_MEMORY_META_PREFIX}${JSON.stringify(compact)}`);
+}
+
+async function persistQualityEvent(phone, event) {
+  await saveMessage(phone, 'assistant', `${QUALITY_META_PREFIX}${JSON.stringify({
+    ts: new Date().toISOString(),
+    phone,
+    ...event
+  })}`);
 }
 
 function readPersistedProfile(history) {
@@ -493,6 +568,11 @@ function formatPropertiesReply(items, profile) {
     lines.push(`${i + 1}. 🏠 *${typeLabel(p.type)}* en *${p.zone || 'zona no especificada'}*`);
     lines.push(`   💰 ${price} | 🛏️ ${roomsLabel(p.bedrooms)}`);
     lines.push(`   🧾 ${p.title || 'Sin título'}`);
+    if (p.listingUrl) lines.push(`   🔗 ${p.listingUrl}`);
+    const photos = Array.isArray(p.imageUrls) ? p.imageUrls.filter(Boolean).slice(0, 3) : [];
+    if (photos.length > 0) {
+      lines.push(`   🖼️ Fotos: ${photos.join(' | ')}`);
+    }
     if (!own && p.agencyName) {
       lines.push(`   🤝 Publica: *${p.agencyName}*${p.agencyPhone ? ` (${p.agencyPhone})` : ''}`);
     }
@@ -670,6 +750,7 @@ module.exports = async function handler(req, res) {
     await saveMessage(phone, 'user', message.trim());
 
     const persistedFilters = readPersistedFilters(rawHistory);
+    const termMemory = readTermMemory(rawHistory);
     const context = buildConversationContext(history, message.trim(), persistedFilters);
     const extracted = context.filters;
     const persistedProfile = readPersistedProfile(rawHistory);
@@ -715,6 +796,7 @@ module.exports = async function handler(req, res) {
         : [];
       await saveMessage(phone, 'assistant', qualificationReply);
       await persistFilters(phone, extracted);
+      await persistQualityEvent(phone, { stage: 'qualification', missing: missingCriteria, hasBudget: Boolean(extracted.price_max) });
       return res.status(200).json({
         response: qualificationReply,
         profile,
@@ -733,6 +815,7 @@ module.exports = async function handler(req, res) {
             const noMoreReply = buildNoMoreFreshReply(extracted, direct.total || direct.items.length);
             await saveMessage(phone, 'assistant', noMoreReply);
             const newCount = await incrementSearchCount(phone);
+            await persistQualityEvent(phone, { stage: 'no_fresh', source: direct.source, total: direct.total || direct.items.length });
             return res.status(200).json({
               response: noMoreReply,
               source: direct.source,
@@ -749,6 +832,8 @@ module.exports = async function handler(req, res) {
 
           const directReply = formatPropertiesReply(selectedItems, profile);
           await saveMessage(phone, 'assistant', directReply);
+          await persistTermMemory(phone, termMemory, message.trim(), extracted);
+          await persistQualityEvent(phone, { stage: 'results', source: direct.source, shown: selectedItems.length, total: direct.total || direct.items.length });
           const newCount = await incrementSearchCount(phone);
           return res.status(200).json({
             response: directReply,
@@ -774,6 +859,7 @@ module.exports = async function handler(req, res) {
         });
         await saveMessage(phone, 'assistant', noResultsReply);
         await persistFilters(phone, extracted);
+        await persistQualityEvent(phone, { stage: 'no_results', source: direct.source, q: extracted.q || null, type: extracted.type || null });
         const newCount = await incrementSearchCount(phone);
         return res.status(200).json({
           response: noResultsReply,
@@ -797,6 +883,7 @@ module.exports = async function handler(req, res) {
     if (!isMarketIntent(message.trim())) {
       const strictReply = 'Para mantener precisión, solo respondo con búsquedas verificables del catálogo. Decime operación, zona, tipo y presupuesto y te doy resultados reales.';
       await saveMessage(phone, 'assistant', strictReply);
+      await persistQualityEvent(phone, { stage: 'strict_guardrail' });
       return res.status(200).json({ response: strictReply, profile });
     }
 
@@ -835,6 +922,7 @@ REGLA COMERCIAL:
     const safeReply = reply || 'No encontré una respuesta útil en este momento. ¿Querés que reformule la búsqueda con más detalle?';
 
     await saveMessage(phone, 'assistant', safeReply);
+    await persistQualityEvent(phone, { stage: 'anthropic_fallback' });
     const newCount = await incrementSearchCount(phone);
 
     return res.status(200).json({

@@ -32,8 +32,16 @@ function pick(obj, paths, fallback = null) {
 }
 
 function normalizeProperty(item) {
+  const id = pick(item, ['id', 'property_id', 'propertyId']);
+  const listingUrl = pick(item, ['listingUrl', 'url', 'public_url'], null)
+    || (id ? `https://www.propieya.com/propiedad/${id}` : null);
+  const imageUrls = normalizeArray(pick(item, ['imageUrls', 'photos', 'images', 'media'], []))
+    .map((img) => (typeof img === 'string' ? img : pick(img, ['url', 'src'], null)))
+    .filter(Boolean);
+  const primaryImage = pick(item, ['primaryImageUrl', 'coverImage', 'image'], null);
+  if (primaryImage && !imageUrls.includes(primaryImage)) imageUrls.unshift(primaryImage);
   return {
-    id: pick(item, ['id', 'property_id', 'propertyId']),
+    id,
     title: pick(item, ['title', 'publication_title', 'name'], 'Propiedad'),
     type: pick(item, ['type', 'property_type', 'propertyType'], 'N/D'),
     zone: pick(item, ['zone', 'location.short', 'city', 'address.locality', 'address.city'], 'N/D'),
@@ -43,6 +51,8 @@ function normalizeProperty(item) {
     agencyName: pick(item, ['agency_name', 'features.kitepropAgency.name', 'publisher.name']),
     agencyPhone: pick(item, ['agency_phone', 'features.kitepropAssignedContact.phone_whatsapp', 'features.kitepropAssignedContact.phone']),
     agencyContactName: pick(item, ['agency_contact_name', 'features.kitepropAssignedContact.full_name']),
+    listingUrl,
+    imageUrls: imageUrls.slice(0, 5),
     raw: item
   };
 }
@@ -58,7 +68,14 @@ function compactProperty(item) {
     bedrooms: item.bedrooms,
     agencyName: item.agencyName,
     agencyPhone: item.agencyPhone,
-    op_type: item.op_type || pick(item.raw, ['operationType', 'operation_type', 'operation', 'operations.0.type'], '')
+    op_type: item.op_type || pick(item.raw, ['operationType', 'operation_type', 'operation', 'operations.0.type'], ''),
+    listingUrl: item.listingUrl || null,
+    imageUrls: normalizeArray(item.imageUrls).slice(0, 5),
+    raw: {
+      address: pick(item.raw, ['address'], {}),
+      city: pick(item.raw, ['city'], null),
+      zone: item.zone
+    }
   };
 }
 
@@ -339,9 +356,7 @@ async function syncCatalogSnapshot() {
     { op_type: 'rental', type: 'apartments', q: 'funes' },
     { op_type: 'sale', type: 'apartments', q: 'rosario' },
     { op_type: 'sale', type: 'house', q: 'rosario' },
-    { op_type: 'sale', type: 'apartments', q: 'funes' },
-    { op_type: 'rental', type: 'apartments', q: 'centro' },
-    { op_type: 'sale', type: 'apartments', q: 'centro' }
+    { op_type: 'sale', type: 'apartments', q: 'funes' }
   ];
   for (const preset of presets) {
     try {

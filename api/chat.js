@@ -146,6 +146,11 @@ function extractFilters(message) {
         cityWords.push(known);
         break;
       }
+    }
+  }
+  if (cityWords.length === 0) {
+    for (const line of rawLines) {
+      const lowerLine = line.toLowerCase();
       if (
         isValidLocationPhrase(lowerLine) &&
         !/(alquiler|venta|depto|departamento|casa|ph|oficina|terreno|presupuesto|dormitorio|ambiente|\d)/i.test(lowerLine)
@@ -209,7 +214,7 @@ function evaluateSearchReadiness(filters) {
   if (!filters?.op_type) missing.push('operacion');
   if (!filters?.q) missing.push('localidad_zona');
   if (!filters?.type) missing.push('tipo_propiedad');
-  if (!filters?.price_max) missing.push('presupuesto');
+  // presupuesto es opcional: se puede buscar en el catálogo y afinar después
   return missing;
 }
 
@@ -257,24 +262,32 @@ function buildNoMoreFreshReply(filters, total) {
 function buildQualificationReply(missing, filters) {
   const labels = {
     operacion: 'operación (*alquiler* o *venta*)',
-    localidad_zona: 'localidad y/o zona',
-    tipo_propiedad: 'tipo de propiedad',
-    presupuesto: 'presupuesto aproximado'
+    localidad_zona: 'zona o ciudad (ej. *Rosario Centro*, *CABA Palermo*)',
+    tipo_propiedad: 'tipo de propiedad (depto, casa, PH, etc.)'
   };
 
   const missingText = missing.map((k) => `- ${labels[k]}`).join('\n');
-  const base = [
-    'Para que la búsqueda sea precisa en Argentina, Chile o Uruguay, necesito completar estos datos antes de buscar:',
-    missingText,
-    '',
-    'Si querés, también sumemos *dormitorios/ambientes* para agilizar resultados.'
-  ];
+  const hasBedrooms = typeof filters?.bedrooms === 'number';
+  const bedroomHint = hasBedrooms
+    ? ''
+    : '\n\nSi querés, agregá *dormitorios/ambientes* para acotar más.';
 
-  if (filters?.op_type || filters?.type || filters?.price_max) {
+  const base = [
+    'Me falta un dato concreto para buscar en el catálogo:',
+    missingText,
+    bedroomHint
+  ].filter((line) => line !== '');
+
+  if (missing.length > 0 && (filters?.op_type || filters?.type || filters?.q || filters?.price_max)) {
+    const typeBit = filters?.type === 'house' ? 'casa' : filters?.type ? 'depto' : 'propiedad';
+    const opBit = filters?.op_type === 'sale' ? 'en venta' : filters?.op_type === 'rental' ? 'en alquiler' : '';
+    const whereBit = filters?.q ? String(filters.q).trim() : '[zona]';
+    const moneyBit = filters?.price_max ? `hasta ${filters.price_max}` : '';
+    const roomBit = hasBedrooms ? `${filters.bedrooms} dorm` : '';
     const quick = [
       '',
-      'Con lo que ya me pasaste, podés responder así:',
-      `"${filters?.type === 'house' ? 'casa' : 'depto'} ${filters?.op_type === 'sale' ? 'en venta' : 'en alquiler'} en [localidad] zona [barrio] ${filters?.price_max ? `hasta ${filters.price_max}` : ''} ${filters?.bedrooms ? `${filters.bedrooms} dormitorios` : ''}"`.replace(/\s+/g, ' ').trim()
+      'Con lo que ya me pasaste podés completar solo lo que falta, por ejemplo:',
+      `"${[typeBit, opBit, 'en', whereBit, moneyBit, roomBit].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()}"`
     ];
     return [...base, ...quick].join('\n');
   }
@@ -282,7 +295,7 @@ function buildQualificationReply(missing, filters) {
   const withQuickType = [...base];
   if (missing.includes('tipo_propiedad')) {
     withQuickType.push('');
-    withQuickType.push('Opciones rápidas de tipo: *Casa* | *Departamento* | *PH* | *Oficina* | *Terreno*');
+    withQuickType.push('Tip rápido de tipo: *Casa* | *Departamento* | *PH* | *Oficina* | *Terreno*');
   }
   return withQuickType.join('\n');
 }
@@ -592,6 +605,11 @@ function formatPropertiesReply(items, profile) {
   return lines.join('\n');
 }
 
+function appendOptionalBudgetHint(reply, filters) {
+  if (filters?.price_max) return reply;
+  return `${reply}\n\nSi querés, decime un tope en pesos o en USD y filtramos más fino.`;
+}
+
 async function getOrCreateUser(phone) {
   const existing = await withDbResilience(
     async () => {
@@ -830,7 +848,7 @@ module.exports = async function handler(req, res) {
           await persistShownIds(phone, updatedShown);
           await persistFilters(phone, extracted);
 
-          const directReply = formatPropertiesReply(selectedItems, profile);
+          const directReply = appendOptionalBudgetHint(formatPropertiesReply(selectedItems, profile), extracted);
           await saveMessage(phone, 'assistant', directReply);
           await persistTermMemory(phone, termMemory, message.trim(), extracted);
           await persistQualityEvent(phone, { stage: 'results', source: direct.source, shown: selectedItems.length, total: direct.total || direct.items.length });
@@ -881,7 +899,7 @@ module.exports = async function handler(req, res) {
     }
 
     if (!isMarketIntent(message.trim())) {
-      const strictReply = 'Para mantener precisión, solo respondo con búsquedas verificables del catálogo. Decime operación, zona, tipo y presupuesto y te doy resultados reales.';
+      const strictReply = 'Para mostrarte resultados reales del catálogo, decime al menos *operación* (alquiler/venta) y *zona o ciudad*. Tipo y presupuesto suman, pero el presupuesto no es obligatorio: puedo listar y después afinamos el precio.';
       await saveMessage(phone, 'assistant', strictReply);
       await persistQualityEvent(phone, { stage: 'strict_guardrail' });
       return res.status(200).json({ response: strictReply, profile });

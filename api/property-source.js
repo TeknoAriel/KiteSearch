@@ -392,11 +392,14 @@ async function syncCatalogSnapshot() {
 }
 
 async function searchProperties(filters) {
-  try {
-    const snapshot = await searchFromSnapshot(filters);
-    if (snapshot.items.length > 0) return snapshot;
-  } catch {
-    // Ignore snapshot read issues and continue with live sources.
+  // Si KITESEARCH_SNAPSHOT_FIRST=1, probamos primero el snapshot en Supabase (más rápido si está fresco).
+  if (process.env.KITESEARCH_SNAPSHOT_FIRST === '1') {
+    try {
+      const fast = await searchFromSnapshot(filters);
+      if (fast.items.length > 0) return fast;
+    } catch {
+      // Seguimos con el resto de fuentes.
+    }
   }
 
   try {
@@ -404,6 +407,13 @@ async function searchProperties(filters) {
     if (propieya.items.length > 0) return propieya;
   } catch {
     // Ignore and continue with secondary sources.
+  }
+
+  try {
+    const snapshot = await searchFromSnapshot(filters);
+    if (snapshot.items.length > 0) return snapshot;
+  } catch {
+    // Ignore snapshot read issues and continue with live sources.
   }
 
   const rest = await searchFromRest(filters);

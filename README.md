@@ -1,20 +1,25 @@
 # KiteSearch
 
-Asistente inmobiliario para web y WhatsApp basado en Vercel Functions, Supabase, Anthropic y MCP de KiteProp.
+Asistente inmobiliario para web y WhatsApp: Vercel Functions, Supabase y API KiteProp.
+
+Listado completo de variables y checklist Meta/WhatsApp: ver **`REGlas_Y_ENV.txt`** en la raíz del repo.
 
 ## Requisitos
 
 - Node.js 18+
 - Proyecto Vercel vinculado
-- Variables de entorno:
-  - `ANTHROPIC_API_KEY`
-  - `KITEPROP_API_KEY`
-  - `SUPABASE_URL`
-  - `SUPABASE_ANON_KEY`
-  - `FREE_SEARCH_LIMIT` (ej. `5`)
-  - opcional: `ANTHROPIC_MODEL` (default `claude-sonnet-4-6`)
-  - opcional: `KITEPROP_MCP_URL` (default `https://mcp.kiteprop.com/mcp`)
-  - opcional: `CHAT_TIMEOUT_MS` (default `25000`)
+
+### Variables obligatorias
+
+- `KITEPROP_API_KEY`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+
+### Opcionales (frecuentes)
+
+- `FREE_SEARCH_LIMIT` (ej. `5`)
+- `KITESEARCH_SNAPSHOT_FIRST` (`1` para priorizar snapshot en Supabase)
+- WhatsApp: `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID` (ver `REGlas_Y_ENV.txt`)
 
 ## Desarrollo local
 
@@ -25,32 +30,24 @@ vercel env pull .env.local --environment=production --yes
 set -a && source .env.local && set +a
 ```
 
-Ejecutar prueba rápida del handler:
+Prueba rápida:
 
 ```bash
-node -e "
-const handler = require('./api/chat.js');
-const req = { method: 'POST', body: { message: 'depto alquiler rosario', phone: 'test' } };
-const res = {
-  status: (c) => ({ json: (d) => console.log('STATUS:', c, JSON.stringify(d, null, 2)) }),
-  setHeader: () => {},
-  end: () => {}
-};
-handler(req, res).catch((e) => console.error('ERROR:', e.message));
-"
+npm run test:smoke
 ```
 
 ## Endpoints
 
-- `POST /api/chat` -> consulta al asistente
-- `GET /api/health` -> chequeo de salud y variables requeridas
+- `POST /api/chat` — consulta al asistente (JSON: `response`, y `suggestions` con `previewImages` si hay resultados)
+- `GET /api/health` — salud y env faltantes; incluye `whatsapp.configured`
+- `GET/POST /api/whatsapp-webhook` — verificación y eventos de WhatsApp Cloud API (Meta)
 
 ## Deploy
 
 ```bash
 git add -A
-git commit -m "feat: hardening de estabilidad"
+git commit -m "tu mensaje"
 git push origin main
 ```
 
-El deploy de producción se publica en Vercel y queda accesible por `https://kitesearch.vercel.app`.
+Producción típica: `https://kitesearch.vercel.app` (ajustar según tu proyecto Vercel).

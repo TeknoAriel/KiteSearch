@@ -1,0 +1,57 @@
+================================================================================
+KiteSearch — Variables de entorno (copiar a Vercel → Settings → Environment Variables)
+================================================================================
+
+Obligatorias (chat + catálogo):
+--------------------------------
+SUPABASE_URL=https://xxxx.supabase.co
+SUPABASE_ANON_KEY=eyJ...
+KITEPROP_API_KEY=tu_api_key_kiteprop
+
+Opcionales (comportamiento):
+-----------------------------
+FREE_SEARCH_LIMIT=5
+DB_TIMEOUT_MS=3500
+DB_RETRIES=2
+CHAT_TIMEOUT_MS=25000
+KITESEARCH_SNAPSHOT_FIRST=0
+CATALOG_SNAPSHOT_MAX_AGE_HOURS=26
+CATALOG_SNAPSHOT_SYNC_LIMIT=1500
+KITEPROP_REST_URL=https://www.kiteprop.com/api/v1/properties
+PROPIEYA_TRPC_URL=https://www.propieya.com/api/trpc/listing.search
+STATIC_FEED_URL=
+
+WhatsApp Cloud API (Meta) — solo si usás /api/whatsapp-webhook:
+-----------------------------------------------------------------
+WHATSAPP_VERIFY_TOKEN=el_mismo_string_que_ponés_en_Meta_al_crear_el_webhook
+WHATSAPP_ACCESS_TOKEN=EAAxxx...   (token de Graph API del número / app)
+WHATSAPP_PHONE_NUMBER_ID=123456789012345
+WHATSAPP_GRAPH_VERSION=v21.0
+WHATSAPP_MAX_IMAGES_PER_PROPERTY=3
+WHATSAPP_SEND_PREVIEW_IMAGES=1
+
+================================================================================
+Meta Developer — Reglas / checklist (WhatsApp)
+================================================================================
+
+1) App → WhatsApp → API Setup: copiá Phone number ID y token (temporal o system user).
+
+2) Webhook:
+   - Callback URL: https://TU_DOMINIO/api/whatsapp-webhook
+   - Verify token: el MISMO valor que WHATSAPP_VERIFY_TOKEN en Vercel.
+   - Suscripción: objeto "whatsapp_business_account", campo "messages".
+
+3) Token de acceso: permisos típicos para enviar mensajes
+   - whatsapp_business_messaging
+   (según la versión de la API que uses en developers.facebook.com)
+
+4) URLs de imágenes en mensajes deben ser HTTPS públicas (WhatsApp descarga el archivo).
+
+5) Tras cambiar env en Vercel: redeploy del proyecto.
+
+================================================================================
+Salud del servicio
+================================================================================
+
+GET https://TU_DOMINIO/api/health
+→ ok: true si faltan env obligatorias; whatsapp.configured indica si WhatsApp puede enviar.

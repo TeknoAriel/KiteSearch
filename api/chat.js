@@ -1,13 +1,8 @@
 const { createClient } = require('@supabase/supabase-js');
-const Anthropic = require('@anthropic-ai/sdk');
 const { searchProperties } = require('./property-source');
 const synonymsConfig = require('../config/synonyms.json');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
-const MCP_URL = process.env.KITEPROP_MCP_URL || 'https://mcp.kiteprop.com/mcp';
-const REQUEST_TIMEOUT_MS = Number.parseInt(process.env.CHAT_TIMEOUT_MS || '25000', 10);
 const DB_TIMEOUT_MS = Number.parseInt(process.env.DB_TIMEOUT_MS || '3500', 10);
 const DB_RETRIES = Number.parseInt(process.env.DB_RETRIES || '2', 10);
 const PROFILE_META_PREFIX = '__kitesearch_profile__:';
@@ -17,29 +12,8 @@ const FILTERS_META_PREFIX = '__kitesearch_filters__:';
 const TERM_MEMORY_META_PREFIX = '__kitesearch_term_memory__:';
 const QUALITY_META_PREFIX = '__kitesearch_quality__:';
 
-const SYSTEM_PROMPT = `Sos KiteSearch, el asistente inmobiliario inteligente de KiteProp.
-
-PERSONALIDAD:
-- Hablás en español rioplatense (vos, tenés, etc.)
-- Sos cálido, directo y eficiente
-- Usás emojis relevantes: 🏠🛏️💰📍✅
-
-CAPACIDADES:
-- Buscar propiedades por tipo, zona, precio, ambientes, amenities
-- Dar análisis de precios de mercado por zona
-- Mostrar detalles completos de propiedades
-- Buscar en toda la red KiteProp
-
-FORMATO DE RESPUESTA (para WhatsApp):
-- Usá *texto* para negrita
-- Máximo 3-4 propiedades por respuesta
-- Para cada propiedad: tipo, zona, precio, ambientes
-- Siempre terminá con una pregunta para continuar
-
-Si no encontrás resultados exactos, sugerí alternativas cercanas.`;
-
 function getMissingEnv() {
-  const required = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'ANTHROPIC_API_KEY', 'KITEPROP_API_KEY'];
+  const required = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'KITEPROP_API_KEY'];
   return required.filter((key) => !process.env[key]);
 }
 
@@ -158,6 +132,22 @@ function extractFilters(message) {
         cityWords.push(lowerLine);
         break;
       }
+    }
+  }
+  if (cityWords.length === 0) {
+    const stripped = compact
+      .replace(/\b(alquiler|alquilar|venta|comprar|busco|quiero|necesito|mostrame|mostrar|depto|departamento|casa|ph|oficina|local|terreno|lote|zona|en|hasta|presupuesto|precio|usd|ars|pesos?|dormitorio(?:s)?|habitaci[oó]n(?:es)?|ambiente(?:s)?|monoambiente)\b/gi, ' ')
+      .replace(/\b\d+(?:[.,]\d+)?(?:k|mil|m)?\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const locationGuess = stripped
+      .split(/\s+/)
+      .filter((token) => token.length >= 3)
+      .slice(0, 3)
+      .join(' ')
+      .trim();
+    if (locationGuess && isValidLocationPhrase(locationGuess)) {
+      cityWords.push(locationGuess);
     }
   }
   localityDetails.forEach((d) => cityWords.push(d));
@@ -312,10 +302,6 @@ function isSearchIntent(message, filters) {
     Boolean(filters?.price_max);
   const searchVerb = /(busco|buscar|quiero|necesito|mostrame|mostrar|filtr|venta|alquiler|zona|dormitorio|ambiente)/i.test(text);
   return hasFilter || searchVerb;
-}
-
-function isMarketIntent(message) {
-  return /(precio(s)? de mercado|tasaci[oó]n|valor por m2|an[aá]lisis de mercado)/i.test(String(message || '').toLowerCase());
 }
 
 function mergeFilters(base, next) {
@@ -544,6 +530,18 @@ function isOwnStock(property, profile) {
   return owner.includes(String(profile.agencyName).toLowerCase());
 }
 
+function buildSuggestionsPayload(items) {
+  return items.slice(0, 4).map((p) => ({
+    id: p.id != null ? String(p.id) : null,
+    title: p.title || null,
+    zone: p.zone || null,
+    price: p.price != null ? p.price : null,
+    currency: p.currency || null,
+    listingUrl: p.listingUrl || null,
+    previewImages: Array.isArray(p.imageUrls) ? p.imageUrls.filter(Boolean).slice(0, 3) : []
+  }));
+}
+
 function formatPropertiesReply(items, profile) {
   const typeLabel = (rawType) => {
     const type = String(rawType || '').toLowerCase();
@@ -567,7 +565,9 @@ function formatPropertiesReply(items, profile) {
     return `${bedrooms} dormitorios`;
   };
 
-  const lines = ['Encontré estas opciones reales para tu búsqueda:'];
+  const lines = [
+    'Opciones del catálogo (solo datos del aviso; si falta link o foto es porque no viene en la fuente):'
+  ];
   let hasExternalStock = false;
   let firstExternal = null;
 
@@ -581,10 +581,17 @@ function formatPropertiesReply(items, profile) {
     lines.push(`${i + 1}. 🏠 *${typeLabel(p.type)}* en *${p.zone || 'zona no especificada'}*`);
     lines.push(`   💰 ${price} | 🛏️ ${roomsLabel(p.bedrooms)}`);
     lines.push(`   🧾 ${p.title || 'Sin título'}`);
-    if (p.listingUrl) lines.push(`   🔗 ${p.listingUrl}`);
+    if (p.listingUrl) {
+      lines.push(`   🔗 ${p.listingUrl}`);
+    } else {
+      lines.push('   🔗 Sin link público en el aviso');
+    }
     const photos = Array.isArray(p.imageUrls) ? p.imageUrls.filter(Boolean).slice(0, 3) : [];
     if (photos.length > 0) {
-      lines.push(`   🖼️ Fotos: ${photos.join(' | ')}`);
+      lines.push(`   🖼️ Vista previa (${photos.length}):`);
+      photos.forEach((url, idx) => lines.push(`      ${idx + 1}. ${url}`));
+    } else {
+      lines.push('   🖼️ Sin fotos en el aviso');
     }
     if (!own && p.agencyName) {
       lines.push(`   🤝 Publica: *${p.agencyName}*${p.agencyPhone ? ` (${p.agencyPhone})` : ''}`);
@@ -856,6 +863,7 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({
             response: directReply,
             source: direct.source,
+            suggestions: buildSuggestionsPayload(selectedItems),
             profile,
             searchCount: newCount,
             searchLimit: FREE_LIMIT,
@@ -897,58 +905,6 @@ module.exports = async function handler(req, res) {
         return res.status(500).json({ error: 'Error consultando catálogo', detail: err?.message || 'Unknown catalog error' });
       }
     }
-
-    if (!isMarketIntent(message.trim())) {
-      const strictReply = 'Para mostrarte resultados reales del catálogo, decime al menos *operación* (alquiler/venta) y *zona o ciudad*. Tipo y presupuesto suman, pero el presupuesto no es obligatorio: puedo listar y después afinamos el precio.';
-      await saveMessage(phone, 'assistant', strictReply);
-      await persistQualityEvent(phone, { stage: 'strict_guardrail' });
-      return res.status(200).json({ response: strictReply, profile });
-    }
-
-    const response = await withTimeout(
-      anthropic.beta.messages.create({
-        model: MODEL,
-        max_tokens: 1024,
-        system: `${SYSTEM_PROMPT}
-
-CONTEXTO DE CLIENTE:
-- tipo_cliente: ${profile.clientType}
-- inmobiliaria: ${profile.agencyName || 'no informada'}
-- telefono_inmobiliaria: ${profile.agencyPhone || 'no informado'}
-
-REGLA COMERCIAL:
-- Si tipo_cliente es inmobiliaria y la propiedad no es stock propio, indicá inmobiliaria publicante y contacto.
-- Si se va a enviar ficha al cliente final para una propiedad externa, preguntá si usar datos de la inmobiliaria del usuario o de la publicante.`,
-        messages: [...history, { role: 'user', content: message.trim() }],
-        mcp_servers: [{
-          type: 'url',
-          url: MCP_URL,
-          name: 'kiteprop',
-          authorization_token: process.env.KITEPROP_API_KEY
-        }],
-        betas: ['mcp-client-2025-04-04']
-      }),
-      REQUEST_TIMEOUT_MS
-    );
-
-    const reply = (response.content || [])
-      .filter(b => b.type === 'text')
-      .map(b => b.text)
-      .join('\n')
-      .trim();
-
-    const safeReply = reply || 'No encontré una respuesta útil en este momento. ¿Querés que reformule la búsqueda con más detalle?';
-
-    await saveMessage(phone, 'assistant', safeReply);
-    await persistQualityEvent(phone, { stage: 'anthropic_fallback' });
-    const newCount = await incrementSearchCount(phone);
-
-    return res.status(200).json({
-      response: safeReply,
-      searchCount: newCount,
-      searchLimit: FREE_LIMIT,
-      remaining: Math.max(0, FREE_LIMIT - newCount)
-    });
 
   } catch (error) {
     const detail = error?.error?.message || error?.message || 'Unknown error';

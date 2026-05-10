@@ -17,6 +17,9 @@ body{font-family:'Sora',sans-serif;background:#1a1a2e;min-height:100vh;display:f
 .msg{max-width:80%;padding:8px 12px;border-radius:8px;font-size:13.5px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word}
 .msg.in{background:#202c33;color:#e9edef;align-self:flex-start;border-top-left-radius:2px}
 .msg.out{background:#005c4b;color:#e9edef;align-self:flex-end;border-top-right-radius:2px}
+.preview-pack{align-self:flex-start;max-width:85%}
+.preview-pack img{display:block;width:100%;max-height:220px;object-fit:cover;border-radius:8px;margin-top:6px}
+.preview-pack .cap{font-size:11px;color:#8696a0;margin-top:4px}
 .typing{display:none;align-self:flex-start;background:#202c33;padding:12px 16px;border-radius:8px;gap:4px;align-items:center}
 .typing.on{display:flex}
 .dot{width:7px;height:7px;border-radius:50%;background:#8696a0;animation:bounce 1.4s infinite}
@@ -133,6 +136,26 @@ const d=await r.json();
 setTyping(false);
 if(d.response)addMsg(d.response,'in');
 else addMsg('No se recibio respuesta del servidor.','in');
+if(Array.isArray(d.suggestions)&&d.suggestions.length){
+const chat=document.getElementById('chat');
+const typing=document.getElementById('typing');
+d.suggestions.forEach((s,idx)=>{
+const urls=(s.previewImages||[]).slice(0,3);
+urls.forEach((url)=>{
+const wrap=document.createElement('div');
+wrap.className='preview-pack';
+const img=document.createElement('img');
+img.src=url;img.alt=s.title||'';img.loading='lazy';
+wrap.appendChild(img);
+const cap=document.createElement('div');
+cap.className='cap';
+cap.textContent=[idx+1+'.',s.title,s.zone].filter(Boolean).join(' ');
+wrap.appendChild(cap);
+chat.insertBefore(wrap,typing);
+});
+});
+chat.scrollTop=chat.scrollHeight;
+}
 if(Array.isArray(d.quickOptions)&&d.quickOptions.length>0){
 renderSuggestions(d.quickOptions.map((o)=>({label:o.label,value:o.value})));
 }else{
